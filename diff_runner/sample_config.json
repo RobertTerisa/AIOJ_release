@@ -1,0 +1,11 @@
+{
+  "name": "UVA10364",
+  "problem_md": "../UVA10364/UVA10364.md",
+  "user": "../UVA10364/UVA10364.cpp",
+  "correct": "../UVA10364/UVA10364_correct.cpp",
+  "generator": "generators/UVA10364_generator.py",
+  "out_dir": "../evaluation_records/UVA10364",
+  "timeout": 10,
+  "compiler": "g++",
+  "std": "c++17"
+}
