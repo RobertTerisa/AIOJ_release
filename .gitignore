@@ -1,0 +1,6 @@
+aioj.workspace.json
+test_data/
+discussion_records/
+evaluation_records/
+__pycache__/
+*.pyc

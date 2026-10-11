@@ -103,3 +103,19 @@ evaluation_records/<题目名>/<题目名>_diff_<时间戳>_submission_<次数>.
 - `参考RE`：题解程序运行错误
 
 MLE 需要额外的内存监控；当前版本不主动检测 MLE。
+
+## 工作区配置（推荐）
+
+先复制模板：
+
+```powershell
+copy template.aioj.workspace.json aioj.workspace.json
+```
+
+然后只写 `--name` 调用：
+
+```powershell
+python <工具目录>\diff_runner\diff_runner.py --workspace-config aioj.workspace.json --name UVA10364
+```
+
+如果当前目录就是工作区根目录，可省略 `--workspace-config`。`problems_dirs` 支持数组，按顺序取第一个命中的 `<题号>/`；题解优先 `<题号>_correct.cpp`，找不到回退 `<题号>_solution.cpp`；数据优先 `IN/*.in`，否则找 `generators_dir/<题号>_generator.py`。产物默认写入配置中的 `data_dir`、`records_dir`。

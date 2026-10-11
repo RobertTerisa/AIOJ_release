@@ -17,7 +17,10 @@
         --out-dir evaluation_records ^
         --timeout 10
 
-也可以使用 JSON 配置文件：
+推荐使用工作区配置，只传题号即可自动定位题目和产物目录：
+    python <工具目录>/diff_runner/diff_runner.py --workspace-config aioj.workspace.json --name UVA10364
+
+未配置工作区时，也可以使用旧的 JSON 参数配置文件：
     python diff_runner/diff_runner.py --config diff_runner/sample_config.json
 
 测试用例来源三选一：
@@ -25,8 +28,8 @@
     --cases <json文件>
     --generator <python文件>
 
-使用 --in-dir 或 --generator 时，对拍器会自动把用例保存到：
-    test_data/<题目名>/cases.json
+使用 --in-dir 或 --generator 时，对拍器会自动把用例保存到 data_dir/<题目名>/cases.json；
+未配置工作区时，data_dir 默认为当前工作目录下的 test_data/。
 
 cases JSON 支持两种格式：
     1. ["完整输入字符串1", "完整输入字符串2"]
@@ -78,6 +81,29 @@ class RunResult:
     input_path: Path
     stdout_path: Path
     stderr_path: Path
+
+
+WORKSPACE_CONFIG_NAME = "aioj.workspace.json"
+
+
+@dataclass
+class WorkspaceConfig:
+    """aioj.workspace.json 的解析结果。
+
+    所有路径都已转为绝对路径；找不到工作区配置时整个对象为 None，
+    此时调用方必须保持旧的显式参数行为。
+    """
+
+    config_path: Path
+    workspace: Path
+    problems_dirs: list[Path]
+    generators_dir: Path
+    discussion_dir: Path
+    records_dir: Path
+    data_dir: Path
+    timeout: float | None
+    compiler: str | None
+    std: str | None
 
 
 def project_root() -> Path:
@@ -141,10 +167,98 @@ def load_config(config_path: Path) -> dict[str, Any]:
     if not isinstance(cfg, dict):
         raise ValueError(f"配置文件必须是 JSON 对象: {config_path}")
     base = config_path.resolve().parent
-    for key in ("problem_md", "user", "correct", "cases", "generator", "in_dir", "out_dir", "build_dir"):
+    for key in ("problem_md", "user", "correct", "cases", "cases_out", "generator", "in_dir", "out_dir", "build_dir"):
         if key in cfg and cfg[key]:
             cfg[key] = resolve_path(cfg[key], base)
     return cfg
+
+
+def first_present(*values: Any) -> Any:
+    """返回第一个非 None 且非空字符串的值；0、False、[] 视为有效值。"""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and value.strip() == "":
+            continue
+        return value
+    return None
+
+
+def load_workspace_config(
+    explicit_path: Path | None,
+    cwd: Path | None = None,
+) -> WorkspaceConfig | None:
+    """加载并解析 aioj.workspace.json。
+
+    explicit_path 对应 --workspace-config；未提供时只在 cwd 下查找同名配置。
+    找不到时返回 None，让调用方回退到旧的显式参数模式。
+    """
+    cwd = cwd or Path.cwd()
+    if explicit_path is not None:
+        config_path = resolve_path(explicit_path, cwd)
+        if config_path is None:
+            raise ValueError("--workspace-config 路径为空")
+        if not config_path.exists():
+            raise ValueError(f"工作区配置不存在: {config_path}")
+    else:
+        config_path = (cwd / WORKSPACE_CONFIG_NAME).resolve()
+        if not config_path.exists():
+            return None
+
+    try:
+        cfg = load_json(config_path)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"工作区配置 JSON 格式错误: {config_path}\n{exc}") from exc
+    if not isinstance(cfg, dict):
+        raise ValueError(f"工作区配置必须是 JSON 对象: {config_path}")
+
+    config_dir = config_path.resolve().parent
+    workspace = resolve_path(cfg.get("workspace"), config_dir) or config_dir
+    workspace = workspace.resolve()
+
+    raw_dirs = first_present(cfg.get("problems_dirs"), cfg.get("problems_dir"))
+    if raw_dirs in (None, "", []):
+        raw_dirs = [workspace]
+    if isinstance(raw_dirs, (str, os.PathLike)):
+        raw_dirs = [raw_dirs]
+    if not isinstance(raw_dirs, list):
+        raise ValueError(f"problems_dirs 必须是数组或字符串: {config_path}")
+
+    problems_dirs: list[Path] = []
+    for item in raw_dirs:
+        resolved = resolve_path(item, workspace)
+        if resolved is None:
+            raise ValueError(f"problems_dirs 中不能有空路径: {config_path}")
+        problems_dirs.append(resolved)
+    if not problems_dirs:
+        raise ValueError(f"problems_dirs 不能为空: {config_path}")
+
+    def dir_value(key: str, default_name: str) -> Path:
+        value = resolve_path(cfg.get(key), workspace)
+        return value or (workspace / default_name)
+
+    return WorkspaceConfig(
+        config_path=config_path,
+        workspace=workspace,
+        problems_dirs=problems_dirs,
+        generators_dir=dir_value("generators_dir", "generators"),
+        discussion_dir=dir_value("discussion_dir", "discussion_records"),
+        records_dir=dir_value("records_dir", "evaluation_records"),
+        data_dir=dir_value("data_dir", "test_data"),
+        timeout=cfg.get("timeout"),
+        compiler=cfg.get("compiler"),
+        std=cfg.get("std"),
+    )
+
+
+def find_problem_dir(name: str, workspace: WorkspaceConfig) -> Path:
+    """按 problems_dirs 顺序查找第一个存在的 <题号>/ 文件夹。"""
+    for base in workspace.problems_dirs:
+        candidate = base / name
+        if candidate.is_dir():
+            return candidate
+    searched = "\n".join(f"  - {base / name}" for base in workspace.problems_dirs)
+    raise ValueError(f"未找到题目文件夹 {name}/，已按顺序查找:\n{searched}")
 
 
 def load_cases_from_json(path: Path) -> list[TestCase]:
@@ -299,6 +413,7 @@ def write_record(
     compiler: str,
     std: str,
     submission: int,
+    dataset: str | None = None,
 ) -> None:
     counts = {k: 0 for k in ("AC", "WA", "TLE", "RE", "参考TLE", "参考RE")}
     for row in rows:
@@ -311,6 +426,8 @@ def write_record(
     lines.append("")
     lines.append(f"- 时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"- 提交次数：第 {submission} 次")
+    if dataset:
+        lines.append(f"- 数据集：{dataset}")
     lines.append(f"- 题目 Markdown：`{display_path(problem_md)}`" if problem_md else "- 题目 Markdown：未提供")
     lines.append(f"- 用户代码：`{display_path(user_src)}`")
     lines.append(f"- 题解代码：`{display_path(correct_src)}`")
@@ -355,7 +472,8 @@ def write_record(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="通用 UVA/OJ 对拍器")
-    parser.add_argument("--config", type=Path, help="JSON 配置文件")
+    parser.add_argument("--config", type=Path, help="旧的 JSON 参数配置文件")
+    parser.add_argument("--workspace-config", type=Path, help="工作区配置文件 aioj.workspace.json；缺省时尝试读取当前目录同名文件")
     parser.add_argument("--name", help="题目名，默认取题目 Markdown 文件名")
     parser.add_argument("--problem-md", type=Path, help="题目 Markdown 文件（独立于对拍器）")
     parser.add_argument("--user", type=Path, help="用户代码 .cpp")
@@ -363,6 +481,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cases", type=Path, help="测试用例 JSON 文件")
     parser.add_argument("--generator", type=Path, help="测试用例生成器 Python 文件")
     parser.add_argument("--in-dir", type=Path, help="包含 .in 文件的目录；对拍器会自动转换为 cases JSON")
+    parser.add_argument("--dataset", help="数据集名；用于区分同一道题的多套数据")
+    parser.add_argument("--cases-out", type=Path, help="显式指定 cases.json 输出路径；优先级高于 --dataset")
     parser.add_argument("--out-dir", type=Path, help="评测记录输出目录；默认 evaluation_records/<题目名>")
     parser.add_argument("--timeout", type=float, help="每个测试用例的用户程序超时时间（秒）")
     parser.add_argument("--compiler", help="C++ 编译器，默认 g++")
@@ -376,45 +496,160 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    cfg: dict[str, Any] = load_config(args.config) if args.config else {}
+    cwd = Path.cwd()
 
-    root = project_root()
+    try:
+        workspace = load_workspace_config(args.workspace_config, cwd)
+    except (ValueError, TypeError, OSError) as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        cfg: dict[str, Any] = load_config(args.config) if args.config else {}
+    except Exception as exc:  # noqa: BLE001 - 友好展示旧配置错误
+        print(f"[错误] 旧配置文件读取失败: {exc}", file=sys.stderr)
+        return 1
 
     def pick(cli_value: Any, key: str, default: Any = None) -> Any:
         if cli_value is not None:
             return cli_value
-        return cfg.get(key, default)
+        return first_present(cfg.get(key), default)
 
-    problem_md = resolve_path(pick(args.problem_md, "problem_md"), Path.cwd())
-    user_src = resolve_path(pick(args.user, "user"), Path.cwd())
-    correct_src = resolve_path(pick(args.correct, "correct"), Path.cwd())
-    cases_path = resolve_path(pick(args.cases, "cases"), Path.cwd())
-    generator_path = resolve_path(pick(args.generator, "generator"), Path.cwd())
-    in_dir = resolve_path(pick(args.in_dir, "in_dir"), Path.cwd())
-    timeout = float(pick(args.timeout, "timeout", 10.0))
-    compiler = str(pick(args.compiler, "compiler", "g++"))
-    std = str(pick(args.std, "std", "c++17"))
-    seed = pick(args.seed, "seed", None)
-    submission = pick(args.submission, "submission", None)
-    build_dir_arg = resolve_path(pick(args.build_dir, "build_dir"), Path.cwd())
+    def pick_path(cli_value: Path | None, key: str) -> Path | None:
+        if cli_value is not None:
+            return resolve_path(cli_value, cwd)
+        value = cfg.get(key)
+        if value is None or str(value).strip() == "":
+            return None
+        return value
 
+    problem_md = pick_path(args.problem_md, "problem_md")
+    user_src = pick_path(args.user, "user")
+    correct_src = pick_path(args.correct, "correct")
+    cases_path = pick_path(args.cases, "cases")
+    generator_path = pick_path(args.generator, "generator")
+    in_dir = pick_path(args.in_dir, "in_dir")
+    out_dir_arg = pick_path(args.out_dir, "out_dir")
+    cases_out_arg = pick_path(args.cases_out, "cases_out")
+    build_dir_arg = pick_path(args.build_dir, "build_dir")
+
+    name_value = first_present(args.name, cfg.get("name"))
+    if name_value is None and problem_md is not None:
+        name_value = problem_md.stem
+    name = str(name_value) if name_value is not None else "diff"
+
+    if workspace is None and any(p is None for p in (user_src, correct_src)):
+        print(
+            "[错误] 未找到工作区配置 aioj.workspace.json，无法自动定位题目文件。\n"
+            "请先把 template.aioj.workspace.json 复制为当前目录的 aioj.workspace.json，"
+            "或显式提供 --problem-md / --user / --correct。",
+            file=sys.stderr,
+        )
+        return 1
+
+    problem_dir: Path | None = None
+    if workspace is not None and any(p is None for p in (problem_md, user_src, correct_src)):
+        try:
+            problem_dir = find_problem_dir(name, workspace)
+        except ValueError as exc:
+            print(f"[错误] {exc}", file=sys.stderr)
+            return 1
+        if problem_md is None:
+            problem_md = problem_dir / f"{name}.md"
+        if user_src is None:
+            user_src = problem_dir / f"{name}.cpp"
+        if correct_src is None:
+            correct_candidate = problem_dir / f"{name}_correct.cpp"
+            solution_candidate = problem_dir / f"{name}_solution.cpp"
+            correct_src = correct_candidate if correct_candidate.exists() else solution_candidate
+
+    if problem_dir is None:
+        if problem_md is not None:
+            problem_dir = problem_md.parent
+        elif user_src is not None:
+            problem_dir = user_src.parent
+
+    if problem_md is not None and not problem_md.exists():
+        print(f"[错误] 题目 Markdown 不存在: {problem_md}", file=sys.stderr)
+        return 1
     if user_src is None or not user_src.exists():
         print(f"[错误] 用户代码不存在: {user_src}", file=sys.stderr)
         return 1
     if correct_src is None or not correct_src.exists():
         print(f"[错误] 题解代码不存在: {correct_src}", file=sys.stderr)
         return 1
-    if problem_md is not None and not problem_md.exists():
-        print(f"[错误] 题目 Markdown 不存在: {problem_md}", file=sys.stderr)
+
+    dataset_raw = first_present(args.dataset, cfg.get("dataset"))
+    dataset = safe_name(str(dataset_raw)) if dataset_raw not in (None, "") else None
+    seed = pick(args.seed, "seed", None)
+    timeout_value = first_present(args.timeout, cfg.get("timeout"), workspace.timeout if workspace else None, 10.0)
+    compiler_value = first_present(args.compiler, cfg.get("compiler"), workspace.compiler if workspace else None, "g++")
+    std_value = first_present(args.std, cfg.get("std"), workspace.std if workspace else None, "c++17")
+    submission = pick(args.submission, "submission", None)
+
+    try:
+        timeout = float(timeout_value)
+    except (TypeError, ValueError):
+        print(f"[错误] --timeout 必须是数字: {timeout_value}", file=sys.stderr)
         return 1
+    compiler = str(compiler_value)
+    std = str(std_value)
 
     sources = [p for p in (cases_path, generator_path, in_dir) if p is not None]
-    if len(sources) != 1:
+    if len(sources) > 1:
         print("[错误] 必须且只能指定 --cases、--generator、--in-dir 之一", file=sys.stderr)
         return 1
 
-    name = str(pick(args.name, "name", problem_md.stem if problem_md else "diff"))
-    out_dir = resolve_path(pick(args.out_dir, "out_dir"), Path.cwd()) or (root / "evaluation_records" / safe_name(name))
+    if not sources and workspace is not None:
+        # 优先题目文件夹里的 IN/，其次工作区生成器目录，最后题目文件夹内的旧式生成器。
+        if problem_dir is not None:
+            in_candidate = problem_dir / "IN"
+            if in_candidate.is_dir() and any(in_candidate.glob("*.in")):
+                in_dir = in_candidate
+        if in_dir is None:
+            candidates: list[Path] = []
+            if name:
+                candidates.append(workspace.generators_dir / f"{name}_generator.py")
+                if problem_dir is not None:
+                    candidates.append(problem_dir / f"{name}_generator.py")
+            for candidate in candidates:
+                if candidate.exists():
+                    generator_path = candidate
+                    break
+        sources = [p for p in (cases_path, generator_path, in_dir) if p is not None]
+
+    if len(sources) != 1:
+        if workspace is None:
+            print(
+                "[错误] 未找到工作区配置 aioj.workspace.json，且没有可用的数据来源。\n"
+                "请先把 template.aioj.workspace.json 复制为当前目录的 aioj.workspace.json，"
+                "或用 --cases / --in-dir / --generator 显式指定数据。",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "[错误] 未找到数据来源。请提供 --in-dir / --generator / --cases，"
+                "或确认题目文件夹下有 IN/*.in 或配置的 generators_dir 下有生成器。",
+                file=sys.stderr,
+            )
+        return 1
+
+    if out_dir_arg is not None:
+        out_dir = out_dir_arg
+    else:
+        records_root = workspace.records_dir if workspace is not None else (cwd / "evaluation_records")
+        out_dir = records_root / safe_name(name)
+        if dataset:
+            out_dir = out_dir / dataset
+
+    if cases_out_arg is not None:
+        cases_json_path = cases_out_arg
+    else:
+        data_root = workspace.data_dir if workspace is not None else (cwd / "test_data")
+        cases_json_path = data_root / safe_name(name)
+        if dataset:
+            cases_json_path = cases_json_path / dataset
+        cases_json_path = cases_json_path / "cases.json"
 
     try:
         if cases_path is not None:
@@ -439,7 +674,6 @@ def main() -> int:
         return 1
 
     if save_cases_json:
-        cases_json_path = root / "test_data" / safe_name(name) / "cases.json"
         cases_json_path.parent.mkdir(parents=True, exist_ok=True)
         cases_data = [{"name": c.name, "input": c.input} for c in cases]
         cases_json_path.write_text(
@@ -447,6 +681,8 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"[cases] 已保存: {display_path(cases_json_path)}")
+    elif cases_out_arg is not None:
+        print("[警告] --cases-out 只在 --in-dir 或 --generator 模式下生效，当前 --cases 模式已忽略", file=sys.stderr)
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -525,6 +761,7 @@ def main() -> int:
         compiler=compiler,
         std=std,
         submission=submission,
+        dataset=dataset,
     )
 
     total = len(rows)
@@ -536,6 +773,7 @@ def main() -> int:
     if not keep_build:
         shutil.rmtree(build_dir, ignore_errors=True)
     return 0 if ac == total else 2
+
 
 
 if __name__ == "__main__":

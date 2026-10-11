@@ -1,0 +1,13 @@
+{
+  "workspace": ".",
+  "problems_dirs": [
+    "."
+  ],
+  "generators_dir": "generators",
+  "discussion_dir": "discussion_records",
+  "records_dir": "evaluation_records",
+  "data_dir": "test_data",
+  "timeout": 10,
+  "compiler": "g++",
+  "std": "c++17"
+}

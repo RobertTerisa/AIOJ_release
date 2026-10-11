@@ -3,6 +3,8 @@
 本文档给未来的 AI 助手使用。目标：不阅读 `diff_runner.py` 源码，也能正确调用对拍器；
 并能根据聊天框中提供的题目要求，写出符合该题目输入格式和约束的数据生成器。
 
+> **v2 更新**：优先使用第九节「工作区配置」。旧章节中的 `diff_runner/generators/`、`test_data/`、`evaluation_records/` 路径是旧版默认；新版推荐用工作区配置的 `generators_dir`、`data_dir`、`records_dir` 定位。
+
 ## 一、目录约定
 
 所有命令都在项目根目录下执行，下面全部使用相对路径。
@@ -28,7 +30,7 @@ discussion_records\
 题目专用的数据生成器目录：
 
 ```text
-diff_runner\generators\
+<generators_dir>\
 ```
 
 当前已有示例：
@@ -36,7 +38,7 @@ diff_runner\generators\
 ```text
 diff_runner\sample_generator.py
 diff_runner\sample_config.json
-diff_runner\generators\UVA10364_generator.py
+<generators_dir>\UVA10364_generator.py
 ```
 
 ## 二、对拍器原则与参数总表
@@ -160,7 +162,7 @@ python diff_runner\diff_runner.py `
   --problem-md <题目.md> `
   --user <用户代码.cpp> `
   --correct <题解代码.cpp> `
-  --generator diff_runner\generators\<题目名>_generator.py `
+  --generator <generators_dir>\<题目名>_generator.py `
   --seed 123 `
   --timeout 10
 ```
@@ -173,7 +175,7 @@ python diff_runner\diff_runner.py `
   --problem-md UVA10364\UVA10364.md `
   --user UVA10364\UVA10364.cpp `
   --correct UVA10364\UVA10364_correct.cpp `
-  --generator diff_runner\generators\UVA10364_generator.py `
+  --generator <generators_dir>\UVA10364_generator.py `
   --seed 123 `
   --timeout 10
 ```
@@ -203,7 +205,7 @@ python diff_runner\diff_runner.py `
   - 不需要再写生成器；
   - 对拍器会自动保存 `test_data\<题目名>\cases.json`。
 - 如果 `IN` 不存在或里面没有 `.in` 文件：
-  - 在 `diff_runner\generators\` 下新建 `<题目名>_generator.py`；
+  - 在 `<generators_dir>\` 下新建 `<题目名>_generator.py`；
   - 实现 `generate_cases(seed=None)`；
   - 对拍器会自动保存 `test_data\<题目名>\cases.json`。
 
@@ -220,7 +222,7 @@ python diff_runner\diff_runner.py `
 ### 5.4 独立检查生成器
 
 ```powershell
-python "diff_runner\generators\<题目名>_generator.py"
+python "<generators_dir>\<题目名>_generator.py"
 ```
 
 ### 5.5 运行对拍器
@@ -234,7 +236,7 @@ python diff_runner\diff_runner.py --name <题目名> --problem-md <题目.md> --
 使用生成器：
 
 ```powershell
-python diff_runner\diff_runner.py --name <题目名> --problem-md <题目.md> --user <用户代码.cpp> --correct <题解代码.cpp> --generator diff_runner\generators\<题目名>_generator.py --seed 123 --timeout 10
+python diff_runner\diff_runner.py --name <题目名> --problem-md <题目.md> --user <用户代码.cpp> --correct <题解代码.cpp> --generator <generators_dir>\<题目名>_generator.py --seed 123 --timeout 10
 ```
 
 ## 六、通用生成器模板
@@ -418,3 +420,38 @@ evaluation_records\<题目名>\<题目名>_diff_<时间戳>_submission_<次数>.
 | RE | 用户程序运行错误 |
 | 参考TLE | 题解程序超时 |
 | 参考RE | 题解程序运行错误 |
+
+## 九、工作区配置（v2，推荐）
+
+现在优先使用工作区配置，不再把题目和产物都放在工具目录。
+
+1. 工作区根目录放 `aioj.workspace.json`；模板为 `template.aioj.workspace.json`。
+2. 配置字段：
+   - `problems_dirs`：题目目录数组，按顺序查找第一个存在的 `<题号>/`；
+   - `generators_dir`：生成器目录；
+   - `data_dir`：`cases.json` 输出目录；
+   - `records_dir`：评测记录输出目录；
+   - `discussion_dir`：讨论整理目录；
+   - `timeout`、`compiler`、`std`：默认编译/运行参数。
+3. 推荐命令：
+
+```powershell
+python <工具目录>\diff_runner\diff_runner.py `
+  --workspace-config <工作区>\aioj.workspace.json `
+  --name <题号>
+```
+
+如果当前目录就是工作区根目录，可省略 `--workspace-config`。
+
+4. 自动定位规则：
+   - 题面：`<problems_dirs 命中的题目目录>/<题号>.md`
+   - 用户代码：`<题号>.cpp`
+   - 题解：`<题号>_correct.cpp`，找不到回退 `<题号>_solution.cpp`
+   - 数据：优先 `<题号>/IN/*.in`；否则 `<generators_dir>/<题号>_generator.py`
+5. 产物：
+   - `<data_dir>/<题号>/cases.json`
+   - `<records_dir>/<题号>/<题号>_diff_<时间戳>_submission_<次数>.md`
+6. 新增可选参数：
+   - `--dataset <名称>`：把测试数据和记录放进 `<题号>/<名称>/` 子目录；
+   - `--cases-out <路径>`：显式指定 `cases.json` 输出路径，优先级高于 `--dataset`。
+7. 旧命令（显式传 `--problem-md/--user/--correct/--in-dir/--generator`）仍然兼容。
