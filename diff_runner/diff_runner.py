@@ -85,6 +85,10 @@ class RunResult:
 
 WORKSPACE_CONFIG_NAME = "aioj.workspace.json"
 
+# 用户程序 TLE 熔断阈值：--tle-policy stop 时，收集到 5 组用户 TLE 后停止后续用例。
+# 题解 TLE / 参考RE 不受此阈值影响，会立即熔断。
+USER_TLE_CIRCUIT_BREAKER_LIMIT = 5
+
 
 @dataclass
 class WorkspaceConfig:
@@ -414,7 +418,10 @@ def write_record(
     std: str,
     submission: int,
     dataset: str | None = None,
+    stopped_reason: str | None = None,
+    skipped_cases: list[TestCase] | None = None,
 ) -> None:
+    skipped_cases = skipped_cases or []
     counts = {k: 0 for k in ("AC", "WA", "TLE", "RE", "参考TLE", "参考RE")}
     for row in rows:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
@@ -433,6 +440,16 @@ def write_record(
     lines.append(f"- 题解代码：`{display_path(correct_src)}`")
     lines.append(f"- 编译命令：`{compiler} -O2 -std={std}`")
     lines.append(f"- 单例超时：{timeout:g} 秒")
+    if stopped_reason:
+        lines.append("- 对拍中止：是")
+        lines.append(f"- 熔断原因：{stopped_reason}")
+        lines.append(f"- 已执行：{len(rows)} / {len(cases)}")
+        lines.append(f"- 未执行：{len(skipped_cases)} 组")
+        if skipped_cases:
+            skipped_names = ", ".join(c.name for c in skipped_cases[:20])
+            if len(skipped_cases) > 20:
+                skipped_names += f" 等 {len(skipped_cases)} 组"
+            lines.append(f"- 未执行用例：{skipped_names}")
     lines.append("")
     lines.append("## 统计")
     lines.append("")
@@ -447,14 +464,22 @@ def write_record(
     lines.append("| 样例 | 具体输入 | 题解输出 | 题解耗时 | 我的输出 | 我的耗时 | 状态 | 备注 |")
     lines.append("|---|---|---:|---:|---:|---:|---|---|")
     for row in rows:
+        user_time = (
+            f"{row['user_time']:.3f}s"
+            if row.get("user_time") is not None
+            else "-"
+        )
+        user_out = row.get("user_out")
+        if user_out is None:
+            user_out = "（未运行）"
         lines.append(
-            "| {name} | {input} | {correct_out} | {correct_time:.3f}s | {user_out} | {user_time:.3f}s | **{status}** | {note} |".format(
+            "| {name} | {input} | {correct_out} | {correct_time:.3f}s | {user_out} | {user_time} | **{status}** | {note} |".format(
                 name=md_cell(str(row["name"])),
                 input=md_cell(row["input"]),
                 correct_out=md_cell(row["correct_out"]),
                 correct_time=row["correct_time"],
-                user_out=md_cell(row["user_out"]),
-                user_time=row["user_time"],
+                user_out=md_cell(str(user_out)),
+                user_time=user_time,
                 status=row["status"],
                 note=md_cell(row.get("note", "")),
             )
@@ -464,6 +489,8 @@ def write_record(
     lines.append("")
     lines.append("- 表格中的 `<br>` 表示换行。")
     lines.append("- 本记录由 diff_runner 自动生成。")
+    if stopped_reason:
+        lines.append("- 本次对拍因 TLE 熔断提前结束，未执行用例未参与统计。")
     lines.append("- MLE 需要额外内存监控；当前版本不主动检测 MLE。")
     lines.append("")
 
@@ -485,6 +512,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cases-out", type=Path, help="显式指定 cases.json 输出路径；优先级高于 --dataset")
     parser.add_argument("--out-dir", type=Path, help="评测记录输出目录；默认 evaluation_records/<题目名>")
     parser.add_argument("--timeout", type=float, help="每个测试用例的用户程序超时时间（秒）")
+    parser.add_argument(
+        "--tle-policy",
+        choices=("continue", "stop"),
+        default="stop",
+        help="TLE 熔断策略：stop=默认，命中题解 TLE/参考RE 立即停止，用户 TLE 收集 5 组后停止；continue=保持旧行为，跑完全部用例",
+    )
     parser.add_argument("--compiler", help="C++ 编译器，默认 g++")
     parser.add_argument("--std", help="C++ 标准，默认 c++17")
     parser.add_argument("--seed", type=int, help="随机生成器 seed")
@@ -714,26 +747,60 @@ def main() -> int:
             shutil.rmtree(build_dir, ignore_errors=True)
         return 1
 
+    tle_policy = args.tle_policy
     print(f"[3/3] 运行 {len(cases)} 组数据，用户程序超时 {timeout:g}s")
     rows: list[dict[str, Any]] = []
+    stopped_reason: str | None = None
+    skipped_cases: list[TestCase] = []
+    user_tle_count = 0
+
     for i, case in enumerate(cases, 1):
         correct_res = run_program(correct_exe, case.input, timeout, build_dir, f"correct_{i:03d}")
-        user_res = run_program(user_exe, case.input, timeout, build_dir, f"user_{i:03d}")
-        status, note = verdict_for(correct_res, user_res)
+
+        user_res: RunResult | None = None
+        should_stop = False
+
+        if tle_policy == "stop" and correct_res.status == "timeout":
+            status, note = "参考TLE", "题解程序超时；TLE 熔断，用户程序未运行"
+            should_stop = True
+        elif tle_policy == "stop" and correct_res.exit_code not in (None, 0):
+            status, note = "参考RE", f"题解程序返回码 {correct_res.exit_code}；TLE 熔断，用户程序未运行"
+            should_stop = True
+        else:
+            user_res = run_program(user_exe, case.input, timeout, build_dir, f"user_{i:03d}")
+            status, note = verdict_for(correct_res, user_res)
+
         rows.append(
             {
                 "name": case.name,
                 "input": case.input,
                 "correct_out": correct_res.stdout,
                 "correct_time": correct_res.elapsed,
-                "user_out": user_res.stdout,
-                "user_time": user_res.elapsed,
+                "user_out": user_res.stdout if user_res is not None else "（未运行）",
+                "user_time": user_res.elapsed if user_res is not None else None,
                 "status": status,
                 "note": note,
             }
         )
         mark = "AC" if status == "AC" else status
         print(f"  {i:03d}/{len(cases):03d} {case.name}: {mark}")
+
+        if tle_policy == "stop" and should_stop:
+            stopped_reason = f"{status}（第 {i} 组：{case.name}）"
+            skipped_cases = cases[i:]
+            print(f"[熔断] {stopped_reason}，跳过剩余 {len(skipped_cases)} 组")
+            break
+
+        if tle_policy == "stop" and user_res is not None and user_res.status == "timeout":
+            user_tle_count += 1
+            if user_tle_count >= USER_TLE_CIRCUIT_BREAKER_LIMIT:
+                stopped_reason = (
+                    f"用户TLE达到 {USER_TLE_CIRCUIT_BREAKER_LIMIT} 组"
+                    f"（第 {i} 组：{case.name}）"
+                )
+                skipped_cases = cases[i:]
+                print(f"[熔断] {stopped_reason}，跳过剩余 {len(skipped_cases)} 组")
+                break
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = safe_name(name)
@@ -762,12 +829,17 @@ def main() -> int:
         std=std,
         submission=submission,
         dataset=dataset,
+        stopped_reason=stopped_reason,
+        skipped_cases=skipped_cases,
     )
 
     total = len(rows)
     ac = sum(1 for r in rows if r["status"] == "AC")
     print()
-    print(f"完成: {ac}/{total} AC")
+    if stopped_reason:
+        print(f"完成: {ac}/{total} AC（TLE 熔断，已跳过 {len(skipped_cases)} 组）")
+    else:
+        print(f"完成: {ac}/{total} AC")
     print(f"记录: {display_path(record_path)}")
 
     if not keep_build:

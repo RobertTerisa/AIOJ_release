@@ -7,7 +7,7 @@
   "discussion_dir": "discussion_records",
   "records_dir": "evaluation_records",
   "data_dir": "test_data",
-  "timeout": 10,
+  "timeout": 1,
   "compiler": "g++",
   "std": "c++17"
 }
