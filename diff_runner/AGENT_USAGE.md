@@ -69,7 +69,7 @@ diff_runner\sample_config.json
 | `--in-dir` | 包含 `.in` 文件的目录 | 无 |
 | `--generator` | 数据生成器 Python 文件 | 无 |
 | `--out-dir` | 评测记录输出目录 | `evaluation_records\<题目名>\` |
-| `--timeout` | 单个测试用例的用户程序超时秒数 | `10` |
+| `--timeout` | 单个测试用例的用户程序超时秒数 | `1` |
 | `--compiler` | C++ 编译器 | `g++` |
 | `--std` | C++ 标准 | `c++17` |
 | `--seed` | 数据生成器随机种子 | 无 |
