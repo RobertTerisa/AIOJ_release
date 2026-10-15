@@ -156,7 +156,7 @@ python <工具目录>\diff_runner\diff_runner.py --name <题号>
 - [ ] Special Judge外挂
 - [ ] MLE检测
   该项目目前只支持非交互、批量输入输出的题目；
-暂不支持交互题、多解题目和 Special Judge。
+
 
 
 
@@ -165,5 +165,4 @@ python <工具目录>\diff_runner\diff_runner.py --name <题号>
 五.写在最后
 这个项目起先是我在大一的某一天刷题的时候刷到UVA的题目，我自己没法注册账号还用不了Remote Judge，刚好电脑里有Deepseek Harness。我就让大肥鱼给我写个对拍器然后借用题解（我的博客里有提到）自己给自己评测一下，后来我觉得用LLM辅助学习算法很有意思，就让大肥鱼把对拍器的脚本单独整理出来复用，后面又编写Agent把我自己的学习流程和要点固定下来，就变成了现在这个Agent雏形。
 
-## v0.2发布
-该版本主要完成了彻底的用户题目数据和模块的解耦，使用aioj.workspace.json配置文件来定位题目以及要求，并提供了修改模板。
+
