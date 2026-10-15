@@ -10,7 +10,7 @@
 - 1. 分支所属如下
    yunhuier:dev/prompts
    qdssl-1023:dev/diff_runner
-
+   RobertTerisa:dev/owner
  - 2. 切换到开发目录后,在本目录打开VS code,新建终端,输入以下命令
     ```bash
    git clone https://github.com/RobertTerisa/AIOJ_release.git
@@ -36,3 +36,5 @@
    git commit -m "本周干了什么"
    git push -u origin 你的分支
    ```
+
+然后进入GitHub仓库主页，点main后选择对应分支，再点contribute，再点open pull request , 填写标题，描述，然后点击 Create pull request。
