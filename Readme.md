@@ -1,34 +1,40 @@
 # AIOJ 使用说明
 
-**事先声明！本项目的readme.md ， idea，agent.md是由本人我亲自起草，其中题号文件夹是我个人测试用的代码。其余部分则是由ai生成！**
+**事先声明！本项目的 readme.md、idea、AGENTS.md 由本人起草，其中 `week_log/` 下的题号文件夹是个人测试用代码（含二进制产物）；其余部分由 AI 生成。**
 
 
 一.项目简介
-本项目支持通过LLM阅读题目以生成样例，并将用户代码和正确答案进行对拍进行测评并结合具体样例进行讲题。具体评测受本机影响，不代表OJ结果。
+本项目基于Deepseek Harness开发，支持通过LLM阅读题目以生成样例，并将用户代码和正确答案进行对拍进行测评并结合具体样例进行讲题。具体评测受本机影响，不代表OJ结果。
 
 
 二.项目架构
- - diff_runner:对拍器本体，内部的readme.md 提供了单独使用此对拍器的相关注意事项，AGENT_USAGE.md是面向agent的对拍器使用指南。题目专用生成器现在放在工作区配置的 generators_dir 下，工具仓库本身不放题号文件。
+ - diff_runner:对拍器本体，内部的readme.md 提供了单独使用此对拍器的相关注意事项，AGENT_USAGE.md是面向agent的对拍器使用指南。题目专用生成器现在放在工作区配置的 generators_dir 下，工具仓库本身不放题号文件；唯一例外是 `week_log/` 文件夹，用于存放每周任务所需的题目材料（含二进制产物）。
  - discussion_records:用于存放人机交互记录
  - evaluation_records:用于存放对拍记录
  - test_data:用于存放生成器生成的对拍数据
  - AGENTS.md
+ - scripts:用于拦截模型默认输出代码段行为
 
 三.项目使用说明
+1. 将scripts中的monitor-plugin文件夹放入.dsh/profile/desktop , 再向cordis.patch.yml加入以下代码以启动拦截:
+   ```
+    insert:
+      id: monitor
+      name: './monitor-plugin/monitor.mjs'
+   ```
 
-
-1. 题目应建立文件夹放在当前目录内，文件夹名字即为题号，在文件夹内应放置3个文件：
+2. 题目应建立文件夹放在当前目录内，文件夹名字即为题号，在文件夹内应放置3个文件：
    - 题号.cpp:该文件为用户所写的代码
    - 题号_correct.cpp或题号_solution.cpp:该文件为题解代码，用于对拍。
    - 题号.md:题面，用于生成数据。
   
 
-2. 数据来源于以下两处：
+3. 数据来源于以下两处：
    - 用户在题目文件夹中建立IN文件夹并在其中放置包含样例的.in文件
    - 生成器自动生成样例
   
 
-3. 对拍器调用命令
+4. 对拍器调用命令
     ```
     python diff_runner\diff_runner.py `
     --name <题号> `
@@ -43,7 +49,7 @@
 改成 --correct <题号>\<题号>_solution.cpp
 
 
-4. 生成器模式
+5. 生成器模式
 
     ```
     python diff_runner\diff_runner.py `
@@ -58,8 +64,8 @@
 
 
     --in-dir 和 --generator 二选一
-5. 测试样例会自动保存至 test_data\<题号>\cases.json
-6. 评测记录会自动保存到 evaluation_records\<题号>\<题号>_diff_<时间戳>_submission_<次数>.md
+6. 测试样例会自动保存至 test_data\<题号>\cases.json
+7. 评测记录会自动保存到 evaluation_records\<题号>\<题号>_diff_<时间戳>_submission_<次数>.md
 
 ### 三.5 工作区配置（推荐）
 
