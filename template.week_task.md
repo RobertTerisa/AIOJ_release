@@ -6,7 +6,7 @@
 > 1. 复制到 `week_log/<执行者的目录>/<日期>_第X周任务日志.md`；
 > 2. 证据统一放入week_log/Github用户名/week(X)/artifacts；
 > 3. 日志中不要粘贴 API Key、token、私钥、`aioj.workspace.json` 原文或完整本机绝对路径。
-> 4. 每周任务所需要的材料统一放入week_log/Github用户名/week(X)/materials
+> 4. 每周任务所需要的材料（含二进制产物）统一放入week_log/Github用户名/week(X)/materials；仓库其他位置不得放置题目文件
 
 ---
 
