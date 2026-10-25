@@ -69,6 +69,7 @@ function clearRegenerations(options) {
 
 /**
  * 包装 LLM 输出流。
+ * 只检查模型对外输出的正文（text-delta）；推理内容（reasoning-delta）不参与拦截。
  * 命中违规序列时：先触发 onViolation，再抛出异常停止当前流。
  */
 function wrapChunkStream(stream, onViolation, onAttemptFinished) {
@@ -78,10 +79,7 @@ function wrapChunkStream(stream, onViolation, onAttemptFinished) {
 
     for await (const chunk of stream) {
       if (!stopped && chunk !== null && typeof chunk === 'object') {
-        if (
-          (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') &&
-          typeof chunk.text === 'string'
-        ) {
+        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
           try {
             window.push(chunk.text)
           } catch (error) {
