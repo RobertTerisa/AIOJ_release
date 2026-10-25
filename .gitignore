@@ -4,3 +4,4 @@ discussion_records/
 evaluation_records/
 __pycache__/
 *.pyc
+generator_operation.md
