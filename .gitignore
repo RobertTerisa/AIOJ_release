@@ -5,3 +5,4 @@ evaluation_records/
 __pycache__/
 *.pyc
 generator_operation.md
+*.exe
