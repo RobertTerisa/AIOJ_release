@@ -489,6 +489,7 @@ def write_record(
     lines.append("")
     lines.append("- 表格中的 `<br>` 表示换行。")
     lines.append("- 本记录由 diff_runner 自动生成。")
+    lines.append("- 评测记录仅代表本机结果，不反映实际OJ评测结果。")
     if stopped_reason:
         lines.append("- 本次对拍因 TLE 熔断提前结束，未执行用例未参与统计。")
     lines.append("- MLE 需要额外内存监控；当前版本不主动检测 MLE。")
