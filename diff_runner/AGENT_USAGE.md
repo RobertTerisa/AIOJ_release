@@ -68,6 +68,10 @@ diff_runner\sample_config.json
 | `--correct` | 题解代码 `.cpp` | 无 |
 | `--in-dir` | 包含 `.in` 文件的目录 | 无 |
 | `--generator` | 数据生成器 Python 文件 | 无 |
+| `--generator-exe` | 外部数据生成入口；可为 `router.py` 或原生 exe | 无 |
+| `--generator-params` | 传给 router 的 `<题号>.generator.json` 路径 | 无 |
+| `--generator-timeout` | 外部生成入口的超时秒数 | `600` |
+| `--no-cases-json` | 不写 `cases.json`（`--in-dir` / `--generator` 也生效） | 否 |
 | `--out-dir` | 评测记录输出目录 | `evaluation_records\<题目名>\` |
 | `--timeout` | 单个测试用例的用户程序超时秒数 | `1` |
 | `--compiler` | C++ 编译器 | `g++` |
@@ -83,6 +87,49 @@ diff_runner\sample_config.json
 
 - 有 `IN` 文件夹：使用 `--in-dir`
 - 需要动态生成数据：使用 `--generator`
+
+> 新增的路由生成方式见 2.3 / 2.4；旧的 `--in-dir` / `--generator` 行为完全不变。
+
+### 2.3 路由生成方式：--generator-exe
+
+题目目录下有 `<题号>.generator.json` 与 `<题号>.cutter.py` 时，用工具侧的 router 生成 `.in`。
+
+```powershell
+python diff_runner\diff_runner.py `
+  --workspace-config aioj.workspace.json `
+  --name <题号> `
+  --generator-exe <工具目录>\generator\router.py `
+  --generator-params <题目目录>\<题号>.generator.json
+```
+
+要点：
+
+- 入口是 `.py` 时对拍器用 `sys.executable` 调用；入口是原生 `.exe` 时直接执行；
+- 对拍器会自动追加 `--seed` / `--output-dir` / `--params` / `--manifest` 四个参数，`cwd` 设为入口所在目录；
+- `--seed` 不传时由对拍器生成 `run_seed`，并写入评测记录；
+- 生成成功后只读取 `<data_dir>\<题号>\*.in`（MVP 不按 manifest 过滤）；
+- 该模式**不写** `cases.json`。
+
+### 2.4 数据来源优先级（软绑死）
+
+只在**没有显式指定**数据来源时生效，优先级从高到低：
+
+```text
+显式 CLI（--cases / --in-dir / --generator / --generator-exe）
+  > <题目目录>\IN\*.in
+  > 工具目录\generator\router.py + <题目目录>\<题号>.generator.json
+  > <题目目录>\<题号>_generator.exe
+  > <generators_dir>\<题号>_generator.py
+  > <题目目录>\<题号>_generator.py
+```
+
+规则：
+
+- **显式 CLI 覆盖 IN**；默认行为仍是「有 IN 优先」；
+- 默认 router 只有在 `router.py` 与 `<题号>.generator.json` **同时存在**时才启用，否则继续往下找；
+- router 一旦启用但执行报错 -> **直接停止，不静默回退**；
+- 显式指定失败即停；自动发现的目标不存在就跳过；
+- 选中的数据源会打印 `[data-source] ...`。
 
 ## 三、用户自有输入方式：--in-dir
 
@@ -238,6 +285,18 @@ python diff_runner\diff_runner.py --name <题目名> --problem-md <题目.md> --
 ```powershell
 python diff_runner\diff_runner.py --name <题目名> --problem-md <题目.md> --user <用户代码.cpp> --correct <题解代码.cpp> --generator <generators_dir>\<题目名>_generator.py --seed 123 --timeout 10
 ```
+
+### 5.6 router 模式的标准流程
+
+```text
+1. 读 <题号>.md，起草 <题号>.generator.json + <题号>.cutter.py
+2. 把题面样例写进 samples[]（job / text / input / confirmed），与用户核对
+3. 确认后用 --generator-exe + --generator-params 跑对拍器（或直接依赖自动发现）
+4. 看 CLI 的 [data-source] 确认选中的是 router
+5. 读评测记录里的 run_seed / manifest 路径复现问题
+```
+
+没有 `IN`、也没有 `<题号>.generator.json` 时，才会退回 4.x 的旧生成器方式。
 
 ## 六、通用生成器模板
 
@@ -421,6 +480,17 @@ evaluation_records\<题目名>\<题目名>_diff_<时间戳>_submission_<次数>.
 | 参考TLE | 题解程序超时 |
 | 参考RE | 题解程序运行错误 |
 
+### 8.2 router 模式的写入行为
+
+| 内容 | 落点 | 说明 |
+|---|---|---|
+| 最终 `.in` | `<data_dir>\<题号>\*.in` | 由 router 发布，目录内不应出现其它临时文件 |
+| `cases.json` | **不写** | router 模式由 `--generator-exe` 触发，强制关闭 |
+| 生成 manifest | `<records_dir>\<题号>\<题号>_generation_manifest_<时间戳>.json` | 含 `status`（ready/ok/failed）与每个 `.in` 的 sha256 |
+| 评测记录 | `<records_dir>\<题号>\<题号>_diff_<时间戳>_submission_<次数>.md` | 元信息含数据来源 / 生成入口 / run_seed / manifest 路径 |
+
+旧流程（`--in-dir` / `--generator`）行为不变：仍然写 `<data_dir>\<题号>\cases.json`。
+
 ## 九、工作区配置（v2，推荐）
 
 现在优先使用工作区配置，不再把题目和产物都放在工具目录。
@@ -455,3 +525,14 @@ python <工具目录>\diff_runner\diff_runner.py `
    - `--dataset <名称>`：把测试数据和记录放进 `<题号>/<名称>/` 子目录；
    - `--cases-out <路径>`：显式指定 `cases.json` 输出路径，优先级高于 `--dataset`。
 7. 旧命令（显式传 `--problem-md/--user/--correct/--in-dir/--generator`）仍然兼容。
+
+## 十、失败输出对照
+
+| 前缀 | 出现位置 | 含义 | 处理 |
+|---|---|---|---|
+| `[data-source] ...` | 对拍器 stdout | 本次实际选中的数据来源 | 先确认是否选对；选错时显式传数据源参数 |
+| `[数据生成失败]` | 对拍器 stderr | 外部生成入口（router 或 exe）失败，后面跟 `entry:` / `exit_code:` / `--- stdout tail ---` / `--- stderr tail ---` | 按尾部信息修 `<题号>.generator.json` / `<题号>.cutter.py` / 生成器注册；此时**不会编译和运行**用户程序 |
+| `[router error] ...` | router stderr（由对拍器原样带出） | 路由内部错误：spec 非法、生成器未注册或未编译、`--only` 无匹配、发布失败 | 按提示修 spec 或注册生成器；router 报错时对拍器不会静默回退 |
+| `[retry] ...` | router stderr | 数据流级校验失败后的重试日志（最多 3 次） | 多为此前生成器输出 token 数与 `content[].count` 不符 |
+
+排查顺序建议：先看 `[data-source]` 是否选中预期来源 -> 再看 `[数据生成失败]` / `[router error]` 的尾部 -> 最后才怀疑用户代码。
