@@ -23,19 +23,56 @@
      - 没有 IN 或没有 .in 文件 -> 必须使用数据生成器。
      - 用户要求更高强度或者额外数据时使用数据生成器。
 
-2. <强制规则> 当你完成上一步后请你阅读 diff_runner/AGENT_USAGE.md 以了解对拍器如何使用。在此之后请你根据题号.md编写数据生成器以准备生成数据。</强制规则>
+   1.5 对拍前样例确认（生成数据前必须完成）
+   - 从 "<题号>.md" 抄出题面样例，作为 "<题号>.generator.json" 里 samples[] 的来源；
+   - 每条样例必须四件套齐全：job / text / input / confirmed
+     - job：该样例对应的临时 job 对象（groups[].control 与 groups[].content 的计数）；
+     - text：进入 cutter 之前的原始数据流文本；
+     - input：题面样例输入原文，cutter 的输出必须与它一致；
+     - confirmed：必须为 true；缺任意一项或 confirmed != true 时，路由直接报错，不跳过。
+   - 样例回放只证明"同一份数据，cutter 的输出和题面样例输入一致"；程序输出是否正确由对拍器负责，不在数据生成器里判断；
+   - 把逐字符核对后的样例先展示给用户确认，确认后再进入第 2 步。
+
+2. <强制规则> 当你完成上一步后请你阅读 diff_runner/AGENT_USAGE.md 以了解对拍器如何使用。</强制规则> 在此基础上完成以下三件事：
+   2.1 先读 diff_runner/AGENT_USAGE.md（强制），并注意其中的新参数 --generator-exe / --generator-params / --generator-timeout / --no-cases-json 与"数据来源优先级"说明；
+   2.2 根据 <题号>.md 起草两份交付物：
+      - <题目目录>\<题号>.generator.json：constraints + input_format + generation + samples（schema_version=2）；
+      - <题目目录>\<题号>.cutter.py：按 input_format 排版，定义 cut(problem, job, text) -> str；
+   2.3 起草完成后，先向用户说明假设（题面没写清楚的约束、格式、下标、多测形式、样例等），等待用户确认后才落地：
+      - 用户确认前不生成大规模数据，也不覆盖题目目录下的已有文件；
+      - "generator/cpp/**" 下的 C++ 生成器由负责人实现、编译、注册，LLM 不写；生成器未注册或未编译时按第 3 步选择数据来源。
 
 3. 数据来源选择
-   A. 有 IN：
+   优先级（高 → 低）：显式 CLI > <题目目录>\IN\*.in > 默认 router + <题号>.generator.json
+                        > <题目目录>\<题号>_generator.exe > 旧 Python 生成器
+   通用规则：显式 CLI 覆盖 IN；默认行为仍是"有 IN 优先"；router 一旦启用但执行报错 -> 直接停止，
+             不静默回退；自动发现不存在就跳过；选中来源由对拍器打印 [data-source] ...。
+
+   A. 显式 CLI：
+      - 可用 --cases <json> / --in-dir <目录> / --generator <python> / --generator-exe <router.py 或 exe>
+      - 显式指定失败即停，错误原样呈现（[router error] / [数据生成失败]）。
+
+   B. 有 IN（默认优先）：
       - 使用 --in-dir <题号>\IN
       - 对拍器自动保存 test_data\<题号>\cases.json
-   B. 无 IN：
+
+   C. 无 IN 且存在 <题号>.generator.json（router 模式，推荐）：
+      - 使用 --generator-exe <工具目录>\generator\router.py --generator-params <题目目录>\<题号>.generator.json
+      - 对拍器自动生成 test_data\<题号>\*.in，且不写 cases.json
+      - 生成器未注册或未编译时，按 CLI 输出的 [router error] 处理，不自己实现 C++ 生成器
+
+   D. 有 <题目目录>\<题号>_generator.exe：
+      - 使用 --generator-exe <该 exe>
+      - 对拍器读取该入口生成的 .in
+
+   E. 旧 Python 生成器（fallback，保留兼容）：
       - 在 diff_runner\generators\ 下创建 <题号>_generator.py
       - 使用 --generator diff_runner\generators\<题号>_generator.py --seed 123
       - 对拍器自动保存 test_data\<题号>\cases.json
 
 4. 每次用户要求你对拍时请你使用对拍器进行对拍，并保存对拍记录，在对拍记录中注明以下声明："本评测记录仅代表本机情况，不代表OJ评测记录"。
    对拍完成后，若记录中存在非 AC 状态，请在同一轮完成两件事：先报告结果，再按下方【模式 A 讲解流程】执行第一级讲解。
+   评测记录中的「数据来源 / 生成入口 / run_seed / manifest 路径」由对拍器自动写入，无需人工填写，也不得手工编造。
 
 ### 模式 A 讲解流程（记录非 AC 时强制执行）
 
@@ -334,6 +371,7 @@
 - 工具箱（本仓库，公开）：只放工具本体、文档与模板；仓库内除 `week_log/`（每周任务材料，含二进制产物）外，任何位置不放题目文件。
 - 工作区（私有，由用户指定）：放题目、生成器、测试数据、聊天整理、评测记录。
 - 两者路径关系本文件不写死，一切以 aioj.workspace.json 为准。
+- `generator/` 是路由层（Python）：读 `<题号>.generator.json`、绑定变量、调用 C++ 生成器、cutter 排版、校验并发布 `*.in`；`generator/cpp/**` 下的 C++ 生成器由负责人实现、编译、注册，Agent 不修改。
 
 ## 2. 配置机制（核心）
 
@@ -458,15 +496,15 @@
 - [ ] A2 只给 --name + 配置，能自动定位题面、用户代码、题解代码。
 - [ ] A3 题解优先找 <题号>_correct.cpp，找不到回退 <题号>_solution.cpp。
 - [ ] A4 problems_dirs 写多个路径时，按顺序取第一个命中的题目。
-- [ ] A5 数据来源：有 IN/ 用 IN；否则用生成器；都没有则报错并说明缺什么。
+- [ ] A5 数据来源：显式 CLI > IN/ > 默认 router + `<题号>.generator.json` > `<题号>_generator.exe` > 旧 Python 生成器；都没有则报错并说明缺什么。旧行为保留：未显式指定时"有 IN/ 用 IN"。
 
 ### B. 产物落点
 
-- [ ] B1 测试数据写入 <data_dir>/<题号>/cases.json。
+- [ ] B1 测试数据写入：router 模式 -> `<data_dir>/<题号>/*.in`（不写 cases.json）；旧流程（`--in-dir` / `--generator`）-> `<data_dir>/<题号>/cases.json`。
 - [ ] B2 评测记录写入 <records_dir>/<题号>/。
-- [ ] B3 生成器从 <generators_dir>/<题号>_generator.py 找到。
+- [ ] B3 生成器定位：router 模式 -> `<题目目录>/<题号>.generator.json` + `<题目目录>/<题号>.cutter.py`；旧流程 -> `<generators_dir>/<题号>_generator.py`。
 - [ ] B4 修改 records_dir 后，产物跟着改。
-- [ ] B5 跑完后，工具仓库 git status 干净，没有任何产物掉进去。
+- [ ] B5 跑完后，工具仓库 git status 干净，没有任何产物掉进去；router 模式不得把 `cases.json`、临时 job 文件、raw 写进工具仓库。
 
 ### C. 配置机制
 

@@ -23,7 +23,8 @@
 未配置工作区时，也可以使用旧的 JSON 参数配置文件：
     python diff_runner/diff_runner.py --config diff_runner/sample_config.json
 
-测试用例来源三选一：
+测试用例来源：
+    --generator-exe <router.py 或原生 exe>  （路由生成 .in，不写 cases.json）
     --in-dir <包含 .in 文件的目录>
     --cases <json文件>
     --generator <python文件>
@@ -48,6 +49,7 @@ import inspect
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -322,6 +324,60 @@ def load_cases_from_generator(path: Path, seed: int | None) -> list[TestCase]:
     return normalize_case_list(raw, path)
 
 
+class GeneratorRunError(Exception):
+    """外部数据生成入口失败。"""
+
+
+def _tail(text: str, limit: int = 2000) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:500] + chr(10) + "..." + chr(10) + text[-limit:]
+
+
+def run_external_generator(exe, output_dir, seed, timeout,
+                           params=None, manifest=None):
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # router.py 是脚本，不能直接执行；原生 exe 直接执行。
+    if exe.suffix.lower() == ".py":
+        cmd = [sys.executable, str(exe)]
+    else:
+        cmd = [str(exe)]
+
+    cmd += ["--seed", str(seed), "--output-dir", str(output_dir)]
+    if params is not None:
+        cmd += ["--params", str(params)]
+    if manifest is not None:
+        cmd += ["--manifest", str(manifest)]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              timeout=timeout, cwd=str(exe.parent))
+    except subprocess.TimeoutExpired as exc:
+        raise GeneratorRunError(
+            f"entry: {exe}"
+            + chr(10) + f"timeout: {timeout}s"
+        ) from exc
+
+    if proc.returncode != 0:
+        parts = [
+            f"entry: {exe}",
+            f"exit_code: {proc.returncode}",
+        ]
+        if proc.stdout.strip():
+            parts.append("--- stdout tail ---")
+            parts.append(_tail(proc.stdout))
+        if proc.stderr.strip():
+            parts.append("--- stderr tail ---")
+            parts.append(_tail(proc.stderr))
+        raise GeneratorRunError(chr(10).join(parts))
+
+    # MVP：直接读取 output_dir 下所有 .in。
+    return load_cases_from_in_dir(output_dir)
+
+
 def compile_source(
     src: Path,
     exe: Path,
@@ -420,6 +476,11 @@ def write_record(
     dataset: str | None = None,
     stopped_reason: str | None = None,
     skipped_cases: list[TestCase] | None = None,
+    data_source: str | None = None,
+    generator_entry: Path | None = None,
+    run_seed: int | None = None,
+    manifest_path: Path | None = None,
+    in_files: list[str] | None = None,
 ) -> None:
     skipped_cases = skipped_cases or []
     counts = {k: 0 for k in ("AC", "WA", "TLE", "RE", "参考TLE", "参考RE")}
@@ -440,6 +501,19 @@ def write_record(
     lines.append(f"- 题解代码：`{display_path(correct_src)}`")
     lines.append(f"- 编译命令：`{compiler} -O2 -std={std}`")
     lines.append(f"- 单例超时：{timeout:g} 秒")
+    if data_source:
+        lines.append(f"- 数据来源：{data_source}")
+    if generator_entry is not None:
+        lines.append(f"- 生成入口：`{display_path(generator_entry)}`")
+    if run_seed is not None:
+        lines.append(f"- run_seed：{run_seed}")
+    if manifest_path is not None:
+        lines.append(f"- manifest：`{display_path(manifest_path)}`")
+    if in_files:
+        shown = ", ".join(in_files[:20])
+        if len(in_files) > 20:
+            shown += f" 等 {len(in_files)} 个"
+        lines.append(f"- .in 文件：{shown}")
     if stopped_reason:
         lines.append("- 对拍中止：是")
         lines.append(f"- 熔断原因：{stopped_reason}")
@@ -509,6 +583,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cases", type=Path, help="测试用例 JSON 文件")
     parser.add_argument("--generator", type=Path, help="测试用例生成器 Python 文件")
     parser.add_argument("--in-dir", type=Path, help="包含 .in 文件的目录；对拍器会自动转换为 cases JSON")
+    parser.add_argument("--generator-exe", type=Path,
+                        help="外部数据生成入口；可以是 router.py 或原生 exe")
+    parser.add_argument("--generator-params", type=Path,
+                        help="传给 router 的 problem.json 路径")
+    parser.add_argument("--generator-timeout", type=float, default=600.0)
+    parser.add_argument("--no-cases-json", action="store_true")
     parser.add_argument("--dataset", help="数据集名；用于区分同一道题的多套数据")
     parser.add_argument("--cases-out", type=Path, help="显式指定 cases.json 输出路径；优先级高于 --dataset")
     parser.add_argument("--out-dir", type=Path, help="评测记录输出目录；默认 evaluation_records/<题目名>")
@@ -563,6 +643,9 @@ def main() -> int:
     cases_path = pick_path(args.cases, "cases")
     generator_path = pick_path(args.generator, "generator")
     in_dir = pick_path(args.in_dir, "in_dir")
+    generator_exe = pick_path(args.generator_exe, "generator_exe")
+    generator_params = pick_path(args.generator_params, "generator_params")
+    generator_timeout = float(args.generator_timeout)
     out_dir_arg = pick_path(args.out_dir, "out_dir")
     cases_out_arg = pick_path(args.cases_out, "cases_out")
     build_dir_arg = pick_path(args.build_dir, "build_dir")
@@ -629,18 +712,36 @@ def main() -> int:
     compiler = str(compiler_value)
     std = str(std_value)
 
-    sources = [p for p in (cases_path, generator_path, in_dir) if p is not None]
+    sources = [p for p in (
+        cases_path, generator_path, in_dir, generator_exe
+    ) if p is not None]
     if len(sources) > 1:
-        print("[错误] 必须且只能指定 --cases、--generator、--in-dir 之一", file=sys.stderr)
+        print("[错误] 必须且只能指定 --cases、--generator、--in-dir、--generator-exe 之一",
+              file=sys.stderr)
         return 1
 
     if not sources and workspace is not None:
-        # 优先题目文件夹里的 IN/，其次工作区生成器目录，最后题目文件夹内的旧式生成器。
+        # 软绑死优先级：
+        #   IN/*.in > 默认 router+spec > 题目级 exe > 旧 Python 生成器
         if problem_dir is not None:
             in_candidate = problem_dir / "IN"
             if in_candidate.is_dir() and any(in_candidate.glob("*.in")):
                 in_dir = in_candidate
-        if in_dir is None:
+
+        # 默认 router：router.py 与 <题号>.generator.json 同时存在才启用。
+        if in_dir is None and problem_dir is not None:
+            router_candidate = project_root() / "generator" / "router.py"
+            spec_candidate = problem_dir / f"{name}.generator.json"
+            if router_candidate.exists() and spec_candidate.exists():
+                generator_exe = router_candidate
+                generator_params = spec_candidate
+
+        if in_dir is None and generator_exe is None and problem_dir is not None:
+            exe_candidate = problem_dir / f"{name}_generator.exe"
+            if exe_candidate.exists():
+                generator_exe = exe_candidate
+
+        if in_dir is None and generator_exe is None:
             candidates: list[Path] = []
             if name:
                 candidates.append(workspace.generators_dir / f"{name}_generator.py")
@@ -650,7 +751,9 @@ def main() -> int:
                 if candidate.exists():
                     generator_path = candidate
                     break
-        sources = [p for p in (cases_path, generator_path, in_dir) if p is not None]
+        sources = [p for p in (
+            cases_path, generator_path, in_dir, generator_exe
+        ) if p is not None]
 
     if len(sources) != 1:
         if workspace is None:
@@ -662,11 +765,30 @@ def main() -> int:
             )
         else:
             print(
-                "[错误] 未找到数据来源。请提供 --in-dir / --generator / --cases，"
-                "或确认题目文件夹下有 IN/*.in 或配置的 generators_dir 下有生成器。",
+                "[错误] 未找到数据来源。请提供 --generator-exe / --in-dir / "
+                "--generator / --cases，或确认题目文件夹下有 IN/*.in、"
+                "<题号>.generator.json 或配置的 generators_dir 下有生成器。",
                 file=sys.stderr,
             )
         return 1
+
+    data_source: str | None = None
+    generator_entry: Path | None = None
+    run_seed: int | None = None
+    manifest_path: Path | None = None
+    in_files: list[str] = []
+
+    if cases_path is not None:
+        data_source = f"cases: {display_path(cases_path)}"
+    elif generator_exe is not None:
+        data_source = f"generator: {display_path(generator_exe)}"
+        generator_entry = generator_exe
+    elif in_dir is not None:
+        data_source = f"IN: {display_path(in_dir)}"
+    elif generator_path is not None:
+        data_source = f"generator: {display_path(generator_path)}"
+        generator_entry = generator_path
+    print(f"[data-source] {data_source}")
 
     if out_dir_arg is not None:
         out_dir = out_dir_arg
@@ -676,10 +798,10 @@ def main() -> int:
         if dataset:
             out_dir = out_dir / dataset
 
+    data_root = workspace.data_dir if workspace is not None else (cwd / "test_data")
     if cases_out_arg is not None:
         cases_json_path = cases_out_arg
     else:
-        data_root = workspace.data_dir if workspace is not None else (cwd / "test_data")
         cases_json_path = data_root / safe_name(name)
         if dataset:
             cases_json_path = cases_json_path / dataset
@@ -691,6 +813,32 @@ def main() -> int:
                 raise ValueError(f"cases JSON 不存在: {cases_path}")
             cases = load_cases_from_json(cases_path)
             save_cases_json = False
+        elif generator_exe is not None:
+            if not generator_exe.exists():
+                raise ValueError(f"生成入口不存在: {generator_exe}")
+            if seed is None:
+                seed = secrets.randbelow(2**31)
+            try:
+                seed = int(seed)
+            except (TypeError, ValueError):
+                raise ValueError(f"--seed 必须是整数: {seed}") from None
+            run_seed = seed
+            output_dir = data_root / safe_name(name)
+            records_root = (
+                workspace.records_dir
+                if workspace is not None
+                else (cwd / "evaluation_records")
+            )
+            manifest_path = records_root / safe_name(name) / (
+                f"{safe_name(name)}_generation_manifest_"
+                f"{time.strftime('%Y%m%d_%H%M%S')}.json"
+            )
+            cases = run_external_generator(
+                generator_exe, output_dir, seed, generator_timeout,
+                generator_params, manifest_path,
+            )
+            in_files = sorted(p.name for p in output_dir.glob("*.in"))
+            save_cases_json = False
         elif generator_path is not None:
             if not generator_path.exists():
                 raise ValueError(f"generator 不存在: {generator_path}")
@@ -699,6 +847,10 @@ def main() -> int:
         else:
             cases = load_cases_from_in_dir(in_dir)  # type: ignore[arg-type]
             save_cases_json = True
+    except GeneratorRunError as exc:
+        print("[数据生成失败]", file=sys.stderr)
+        print(exc, file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001 - 把错误友好地展示给调用方
         print(f"[错误] {exc}", file=sys.stderr)
         return 1
@@ -707,7 +859,11 @@ def main() -> int:
         print("[错误] 没有加载到任何测试用例", file=sys.stderr)
         return 1
 
-    if save_cases_json:
+    should_save = save_cases_json and not args.no_cases_json
+    if generator_exe is not None:
+        should_save = False
+
+    if should_save:
         cases_json_path.parent.mkdir(parents=True, exist_ok=True)
         cases_data = [{"name": c.name, "input": c.input} for c in cases]
         cases_json_path.write_text(
@@ -832,6 +988,11 @@ def main() -> int:
         dataset=dataset,
         stopped_reason=stopped_reason,
         skipped_cases=skipped_cases,
+        data_source=data_source,
+        generator_entry=generator_entry,
+        run_seed=run_seed,
+        manifest_path=manifest_path,
+        in_files=in_files,
     )
 
     total = len(rows)

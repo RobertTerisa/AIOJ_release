@@ -153,6 +153,55 @@ python <工具目录>\diff_runner\diff_runner.py --name <题号>
 - `discussion_records/` 默认整体被 `.gitignore` 忽略；如果希望把某个 `BUGLOG.md` 提交到仓库，需要手动 `git add -f` 或添加 ignore 例外。
 
   
+### 三.6 新工作流：路由生成 `.in` → cutter 排版 → 对拍器消费
+
+除了「`IN` 目录」和「旧 Python 生成器」，现在多了一条默认路径：由工具自带的**路由器**读题目的 `<题号>.generator.json`，调用 C++ 生成器产出数据，再由每题自己的 `<题号>.cutter.py` 排版成最终 `.in`。
+
+需要的文件（都放在题目目录 `<problems_dirs 之一>/<题号>/` 下）：
+
+| 文件 | 作用 |
+|---|---|
+| `<题号>.generator.json` | 声明约束（`constraints`）、输入格式（`input_format`）、生成计划（`generation`）、样例回放数据（`samples`） |
+| `<题号>.cutter.py` | 每题一个 `cut(problem, job, text) -> str`，决定 token 顺序、换行、`T`、下标偏移 |
+| `generator/bin/<题型>/<生成器>.exe` | C++ 数据生成器（由负责人实现、编译、注册，Agent 不写） |
+
+流程：
+
+```text
+<题号>.generator.json ──┐
+                        ├─> router.py ─> 临时 .in ─> <题号>.cutter.py ─> 最终 .in
+C++ 生成器（bin/…）──────┘                                   │
+                                                             ▼
+                                        diff_runner ─> 编译/运行/比对 ─> 评测记录
+```
+
+命令（推荐直接依赖自动发现，只给题号）：
+
+```powershell
+python <工具目录>\diff_runner\diff_runner.py `
+  --workspace-config aioj.workspace.json `
+  --name <题号>
+```
+
+也可以显式指定入口：
+
+```powershell
+python <工具目录>\diff_runner\diff_runner.py `
+  --name <题号> `
+  --generator-exe <工具目录>\generator\router.py `
+  --generator-params <题目目录>\<题号>.generator.json
+```
+
+与旧流程的差别：
+
+- 数据落点：router 模式写 `<data_dir>/<题号>/*.in`，**不写 `cases.json`**；`--in-dir` / `--generator` 仍写 `cases.json`；
+- 数据来源优先级：显式 CLI > `IN/*.in` > 默认 router + spec > `<题号>_generator.exe` > 旧 Python 生成器；**显式 CLI 覆盖 IN**；
+- 失败时：router 报错会直接终止并打印 `[router error]` / `[数据生成失败]`，**不会静默回退**到旧生成器；
+- 评测记录会多出「数据来源 / 生成入口 / run_seed / manifest 路径」四项。
+
+`aioj.workspace.json` 不需要为 router 增加任何字段：router 是工具侧默认入口，软绑死。
+
+  
 四.目前支持情况
 - [x] 普通OJ题普通情况 
 - [x] 普通OJ题极端情况
