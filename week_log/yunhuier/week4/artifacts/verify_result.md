@@ -2,7 +2,7 @@
 
 > 说明：以下数据为本机实测，仅代表本机环境，不代表 OJ 或 CI 环境。
 > 环境：Windows 11 / g++ 8.1.0 / `-O2 -std=c++17 -Wall -Wextra` / Python 3.13.9
-> 验收脚本：`artifacts/test_week4.py`（26 项，全部 PASS）
+> 验收脚本：`artifacts/test_week4.py`（递增/递减，26 项）与 `artifacts/test_week4_random.py`（随机小/随机大/全相等，45 项），合计 **71 项全部 PASS**。
 
 ## 1. 编译
 
@@ -57,7 +57,23 @@ g++ -O2 -std=c++17 -Wall -Wextra -o generator/bin/sequence/seq_decreasing.exe ge
 | 未识别参数 `--foo` | 1 | `[seq_increasing] 未识别参数: --foo` |
 | 区间容纳不下（`5,1,3`） | 1 | `[seq_increasing] 区间容纳不下严格递增序列：需要跨度至少 4，实际只有 2` |
 
-## 5. 路由识别验证（临时登记后已回滚）
+## 5. 随机小 / 随机大 / 全相等（45 项全 PASS）
+
+脚本：`artifacts/test_week4_random.py`
+
+| # | 检查项 | 结果 | 实测值 |
+|---|---|---|---|
+| 1–5 | 随机小：退出码、5000 个、值域 [1,1e6]、非常量、无 CR | PASS | min 1 / max 1e6 量级，不同值远多于 1 |
+| 6–9 | 随机大：退出码、1e6 个、值域、耗时 | PASS | 最快 173 ms，min 1 / max 999998 |
+| 10–14 | 全相等：退出码、1e6 个、只有一个不同值、值域 [1,1e7]、耗时 | PASS | 值 5587660，最快 173 ms |
+| 15 | 全相等：min=max 时等于该值 | PASS | `{42}` |
+| 16–18 | 三个 exe：长度 0 输出空行 | PASS | `b'\n'` |
+| 19–21 | 三个 exe：多 `--array` 输出两行 | PASS | 2 行 |
+| 22–25 | 三个 exe：同 seed 逐字节一致 | PASS | sha256 相同 |
+| 26–28 | 三个 exe：不同 seed 输出不同 | PASS | — |
+| 29–45 | 三个 exe × 6 类错误输入 | PASS | 全部 exit=1 且有 stderr |
+
+## 6. 路由识别验证（临时登记后已回滚）
 
 `registry.py` 属框架作者文件，本次**未提交任何修改**。为确认 exe 能被路由识别，本地临时取消两行注释后执行：
 
