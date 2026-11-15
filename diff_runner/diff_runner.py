@@ -607,6 +607,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--keep-build", action="store_true", help="保留编译和运行中间文件")
     return parser.parse_args()
 
+def parse_md(path):
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r'<!--\s*AIOJ-META(.*?)-->', text, re.S)
+    meta = m.group(1) if m else ""
+    tl = re.search(r'TL:\s*(\d+(?:\.\d{1,3})?)\s*s?', meta)
+    timeout_md = float(tl.group(1)) if tl else None
+    return timeout_md
 
 def main() -> int:
     args = parse_args()
@@ -696,10 +704,12 @@ def main() -> int:
         print(f"[错误] 题解代码不存在: {correct_src}", file=sys.stderr)
         return 1
 
+    timeout_md = parse_md(problem_md) if problem_md is not None else None
+
     dataset_raw = first_present(args.dataset, cfg.get("dataset"))
     dataset = safe_name(str(dataset_raw)) if dataset_raw not in (None, "") else None
     seed = pick(args.seed, "seed", None)
-    timeout_value = first_present(args.timeout, cfg.get("timeout"), workspace.timeout if workspace else None, 10.0)
+    timeout_value = first_present(timeout_md, args.timeout, cfg.get("timeout"), workspace.timeout if workspace else None, 10.0)
     compiler_value = first_present(args.compiler, cfg.get("compiler"), workspace.compiler if workspace else None, "g++")
     std_value = first_present(args.std, cfg.get("std"), workspace.std if workspace else None, "c++17")
     submission = pick(args.submission, "submission", None)
