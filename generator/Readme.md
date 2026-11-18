@@ -65,10 +65,14 @@ AIOJ_release/
 │   ├── cutter_runner.py   # cutter 子进程执行器
 │   ├── validate.py        # 最终 .in 校验 + 行级校验
 │   ├── publish.py         # 发布 + manifest
-│   ├── cpp/
-│   │   ├── common.h       # 公共参数解析 / 输出打开 / PRNG
-│   │   └── <模式>/<生成器>.cpp
-│   └── tests/             # 单元测试与端到端测试
+│   └── cpp/
+│       ├── common.h              # 公共参数解析 / 输出打开 / PRNG
+│       └── sequence/             # 已实现（源码在库，exe 不入库）
+│           ├── seq_random_small.cpp
+│           ├── seq_random_large.cpp
+│           ├── seq_increasing.cpp
+│           ├── seq_decreasing.cpp
+│           └── seq_all_equal.cpp
 └── diff_runner/
     └── diff_runner.py
 ```
@@ -82,7 +86,13 @@ generator/bin/
 └── string/     # 预留
 ```
 
-> 目录里列的是规划结构；**实际可用以 `generator/registry.py` 的 `GENERATORS` 为准**。
+> 上表是**当前实际结构**（2026-11-12 核对）。以下为**规划但尚未创建**，不要当成现状：
+>
+> - `generator/cpp/<其它模式>/`：图论、字符串生成器源码尚未落地；
+> - `generator/tests/`：单元测试 / 端到端测试目录尚未创建；
+> - `generator/bin/<kind>/`：编译产物目录，`*.exe` 被 `.gitignore` 忽略，需要自行编译生成。
+>
+> **实际可用以 `generator/registry.py` 的 `GENERATORS` 为准**：目前只有 `seq_random_small` 处于注册状态，`seq_random_large` / `seq_increasing` / `seq_decreasing` / `seq_all_equal` 的源码已存在但注册项仍是注释状态。
 
 ### 2.2 题目目录（工作区）
 
@@ -104,7 +114,12 @@ evaluation_records/<题号>/<题号>_generation_manifest_<ts>.json  # 生成 man
 evaluation_records/<题号>/<题号>_diff_<ts>_submission_<n>.md    # 对拍记录
 ```
 
-临时文件（`test_data/<题号>/.tmp_<run_seed>/`）在发布成功后会被清理；发布失败时保留，便于人工恢复。
+临时目录 `test_data/<题号>/.tmp_<run_seed>/` 带标记文件 `.router_tmp`：
+
+- 成功发布后清理当前临时目录（清理失败只打印 `[警告]`，不影响退出码）；
+- 任一步失败时保留当前临时目录，并在 stderr 打印 `[router error] 临时目录已保留: <路径>`；
+- 下次启动只清理**带 `.router_tmp` 标记且不是当前 run_seed** 的历史 `.tmp_*`；无标记的目录一律不碰；
+- 当前 run_seed 的 `.tmp_<seed>` 若已存在但缺标记，按路径冲突处理，拒绝删除并返回 `2`。
 
 ---
 
@@ -259,12 +274,23 @@ python <工具目录>/generator/router.py `
 | 字段 | 说明 |
 |---|---|
 | `multi_case.T` | 每个测试点的组数范围，支持 `min` / `max` 或整数 |
-| `cases[]` | 一个测试点一条规则 |
+| `cases[]` | 一个测试点一条规则；**可省略**（启用 `coverage` 时可只写 `coverage`）。同一生成器允许写多条，一条都不会被删 |
 | `cases[].generator` | **注册表里的生成器 id**（不含 `.exe`） |
 | `cases[].repeat` | 该规则重复生成几个测试点 |
 | `cases[].scale` | `min` / `max` / `small` / `medium` / `random` |
 | `cases[].bind` | 覆盖某个变量的取值或范围（如 `"base_m": "n-1"`） |
 | `cases[].mutation` | 图论变异（`duplicate` / `self_loop`），序列题不用 |
+| `cases[].name` | 用例用途标签（如 `max-scale`）。只做标记：不进 `test_point_id`、不进 `.in` 文件名、不进 `derive_seed()`、不参与唯一性统计；缺省为空串，写进 manifest 的 `files[].name` |
+| `coverage` | **可选**。开启后「跑什么」从白名单（`cases[]`）改为「默认全跑 + 否决清单」：候选 = 注册表中 `kind` 相符且 exe 存在的生成器，逐条 include，再按 `exclude[]` 剔除；未出现在 `cases[]` 的候选按 `default_plan` 补规则。不写 `coverage` 时保持旧白名单行为，并打印 `[coverage][legacy] 白名单模式，不保证全覆盖` |
+| `coverage.target_groups` | 目标 `.in` 份数。`default_plan.repeat = "auto"` 时**必填**（普通/图论 50，搜索/DFS/BFS/回溯 20）；缺失直接 `[router error] code=invalid-coverage` 退 2，不设缺省值 |
+| `coverage.default_plan` | 未出现在 `cases[]` 的候选使用的计划，缺省 `{"scale": "random", "repeat": "auto"}` |
+| `coverage.default_plan.scale` | 取值同 `cases[].scale` |
+| `coverage.default_plan.repeat` | 正整数或 `"auto"`。`"auto"` 只补差额、均分、余数给前几名，组数不超 `target_groups`（人工条目已凑满时每个候选仍跑 1 次，故可能略超） |
+| `coverage.exclude[]` | 否决清单，缺省为空 = 候选全集全部运行 |
+| `coverage.exclude[].generator` | 必须是已注册 id：未注册报 `code=unsupported-generator` 退 2；同一 id 重复条目报 `code=invalid-coverage` |
+| `coverage.exclude[].reason` | 必填，非空字符串。每次「减法」都必须给理由，进日志与 manifest |
+| `coverage.exclude[].reason_code` | 可选，只用于分类：`impossible_by_semantics` / `not_applicable` / `redundant` / `other` |
+| `coverage.exclude[].evidence` | 可选 `{file, quote}`。给了 `quote` 就在 `file`（默认 `<题号>.md`）里做子串匹配，**匹配不到只提示、不报错** |
 
 ### 4.6 `samples[]`（样例回放）
 
@@ -345,13 +371,13 @@ a.in 内容（示意）：
 | 出现未识别参数 | 非 `0` | stderr 指出参数名 |
 | 打不开输出文件 | 非 `0` | stderr 说明路径 |
 
-路由侧遇到非 `0` 会报 `生成器失败: <exe> (exit=N)` 并附上 stderr / stdout 尾部，评测在**编译前**终止。
+路由侧遇到非 `0` 会报 `生成器失败: <exe> (exit=N)`，并附上 **stderr 或 stdout 其中一路**（优先 stderr，取不到才用 stdout）的尾部，最多 2000 字符；评测在**编译前**终止。
 
 ### 5.3 参数是怎么算出来的（spec → argv）
 
 | 参数 | 来源 |
 |---|---|
-| `--seed` | `sub_seed = H(run_seed, generator, group_index, attempt)`，由路由派生 |
+| `--seed` | `sub_seed = H(run_seed, generator, ordinal, group_index, attempt)`，由路由派生；`ordinal` 是规则序号（`repeat` 的每次展开各占一个） |
 | `--out` | 当前测试点的临时 `.in` 路径 |
 | `--append` | 路由固定传入 |
 | `--array` | 每个 `constraints.arrays[]` 一项，取值为 `绑定出的 length, min, max` |
@@ -555,13 +581,22 @@ def cut(problem: dict, job: dict, text: str) -> str: ...
 ## 12. seed 策略
 
 - `run_seed` 一个测试点批次一个，由对拍器生成（也可用 `--seed` 显式覆盖）；
-- 每组 `sub_seed = H(run_seed, generator, group_index, attempt)`；
+- 每组 `sub_seed = H(run_seed, generator, ordinal, group_index, attempt)`，`ordinal` 是规则序号（`repeat` 的每次展开各占一个）；
 - 生成器只接收 `sub_seed`；
 - `run_seed` 写入 manifest 与评测记录；
 - 成功组的 `sub_seed` / `attempt` 写入 job 对象；失败 attempt 只打日志；
 - 最终 `.in` 落盘保留，WA 时可直接复现。
 
-⚠️ 已知行为：`sub_seed` 只由 `(run_seed, generator, group_index, attempt)` 决定，**不含规则序号**。所以同一条规则 `repeat > 1` 时会得到多个完全相同的 `.in`；需要不同数据时，请写成多条 `bind` 不同的规则（各自 `repeat = 1`）。
+`ordinal` 进哈希解决的是「同一 `generator` 的多条规则 / 多次 `repeat` 拿到同一个种子」：现在它们是不同的 `sub_seed`，绑定出的数值也各自独立。
+
+> 种子不同不保证数据不同：可行域小（判断题、`n<=10`、`bind` 写死、形态生成器只由 `n` 决定）时，种子不同而数据相同是必然的。这正是唯一性只告警、不阻塞的原因。
+
+唯一性可见性：
+
+- 发布前 router 打印 `[verify] N 份数据 / M 份互不相同`；`M < N` 时打印 `[warn] 存在 N-M 份重复数据，已放行（不阻塞发布）`，并用 `[warn] 重复: a.in == b.in …` 逐组列出；
+- 只告警：不改退出码、不阻塞发布、**不写 manifest**；可行域小于组数的题出现重复属正常；
+- 通道：`[verify]` 走 stdout，`[warn]` 走 stderr（两者都不是错误）；
+- 这两行只**直接运行 `generator/router.py`** 时可见；经 `diff_runner` 运行时被丢弃（成功路径不转述 router 输出，见 T-050）。
 
 ---
 
@@ -573,6 +608,14 @@ def cut(problem: dict, job: dict, text: str) -> str: ...
 4. 逐文件 `os.replace` 到 `test_data/<题号>/`；
 5. 全部成功 → `status = "ok"`，清理临时目录；
 6. 中途失败 → `status = "failed"`，**保留临时目录**并打印路径，返回非 0。
+
+临时目录的生命周期：
+
+- 创建时写入标记文件 `.tmp_<run_seed>/.router_tmp`，用于区分“router 建的目录”和用户自己的目录；
+- 成功发布后清理当前目录；清理失败打印 `[警告] 临时目录清理失败（数据已发布）: …`，退出码仍为 `0`；
+- 生成 / 样例回放 / 发布任一步失败时保留当前目录，并在 stderr 打印 `[router error] 临时目录已保留: <路径>`（同一轮只打印一次）；
+- 启动时自动清理历史 `.tmp_*`，但**只删带 `.router_tmp` 标记且非当前 run_seed 的目录**；`symlink`/junction 与无标记目录一律不碰（清理失败只打印 `[警告] 历史临时目录清理失败: …`）；
+- 同一 `--seed` 重跑：带标记的旧目录先删后建；缺标记则判定为路径冲突，打印 `[router error] 临时目录路径已存在且缺少标记，拒绝删除: <路径>` 并返回 `2`。
 
 manifest 示例：
 
@@ -594,7 +637,41 @@ manifest 示例：
 | `ok` | 全部发布成功 |
 | `failed` | 发布失败，临时目录保留 |
 
-> 已知限制：MVP 不做目录级原子替换，也不删除 `test_data/<题号>/` 里上一轮的旧 `.in`，对拍器会把它们一起读入。
+字段口径：**既有字段不变，新增两个可选字段**——`files[].name`（用例用途标签，来自 `generation.cases[].name`，缺省 `""`）与顶层 `coverage`（覆盖率账本）。`schema_version` 仍然为 `2`；唯一性只体现在日志，**不进 manifest**。
+
+| 字段 | 谁写 | 是否必填 | 对拍器是否读 |
+|---|---|---|---|
+| `schema_version` / `problem_id` / `run_seed` / `status` / `files[].in` / `files[].sha256` | 既有 | 是 | 读（`load_cases_from_manifest()` 强校验） |
+| `files[].groups` | 既有 | 是 | 不读 |
+| `files[].name` | 新增 | 否（缺省 `""`） | 不读 |
+| `coverage` | 新增（仅 coverage 模式写；legacy 模式不写） | 否 | 不读 |
+
+coverage 模式下的 manifest 追加段（`schema_version` 仍为 2）：
+
+```json
+"coverage": {
+  "mode": "exhaustive",
+  "target_groups": 50,
+  "effective_repeat": null,
+  "planned_repeats": { "seq_random_large": 17, "seq_increasing": 16, "seq_decreasing": 16 },
+  "manual_rules": 1,
+  "planned_rules": 3,
+  "groups": 50,
+  "candidates": ["seq_random_small", "seq_random_large", "seq_increasing",
+                 "seq_decreasing", "seq_all_equal"],
+  "covered": ["seq_decreasing", "seq_increasing", "seq_random_large", "seq_random_small"],
+  "excluded": [{ "generator": "seq_all_equal", "reason": "题面要求元素两两不同",
+                 "reason_code": "impossible_by_semantics" }],
+  "skipped": []
+}
+```
+
+- 各候选 `repeat` 不同时 `effective_repeat` 为 `null`，靠 `planned_repeats` 复现这一轮为什么是 N 组；
+- 账本两行汇总（`[coverage] 候选 … = 覆盖 … + 否决 … + 跳过 …` / `[coverage] 规则 … = 人工 … + 默认计划 …`）走 **stdout**；`[coverage][exclude]` / `[skip]` / `[plan]` / `[skipped]` / `[evidence][warn]` 走 **stderr**。
+
+> 已知限制：MVP 不做目录级原子替换，也不删除 `test_data/<题号>/` 里上一轮的旧 `.in`。
+> 旧 `.in` 仍保留，但 **router 模式下对拍器不再目录扫描**：只加载本次 manifest `files[].in` 列出的文件，旧文件自然不参与评测。
+> 非 `router.py` 的外部入口（如 `xxx_router.py`、原生 exe）没有 manifest，仍按目录扫描，可能把旧 `.in` 一起读入；此时对拍器会打印 `[警告]`。
 
 ---
 
@@ -615,7 +692,26 @@ python generator/router.py --spec <题号>.generator.json --output-dir <目录> 
 | `--manifest` | manifest 输出路径 |
 | `--list-generators` | 只打印注册表（可单独运行，不需要 `--spec` / `--output-dir`） |
 
-退出码：`0` 成功；`2` 参数 / 规格 / 生成失败（打印 `[router error] ...`）；`1` 发布失败。
+退出码：
+
+| 退出码 | 覆盖范围 |
+|---|---|
+| `0` | `--list-generators` 正常输出；或生成 + 校验 + 发布 + manifest 全部成功 |
+| `1` | 发布失败（`PublishError`，manifest 写为 `status=failed`，临时目录保留） |
+| `2` | 其余失败：缺 `--spec` / `--output-dir`、spec 非法（`DiagnosticError` 各 `code`）、绑定失败、生成器未注册 / 未编译、生成失败、样例回放失败、重试耗尽、cutter 失败、`--only` 无匹配、临时目录路径冲突、当前临时目录清理失败、manifest 写入失败（数据已发布）、系统 `OSError` |
+
+补充说明：
+
+- `2` 是"参数 / 规格 / 生成失败"的总汇，**不区分轻重**；要区分具体原因请看 `[router error] code=` 行或文本；
+- 成功发布后清理临时目录失败只打印 `[警告]`，**不改变退出码**（仍为 `0`）；
+- 本轮未新增任何数字退出码。
+
+`[router error]` 的两种形态：
+
+- **结构化多行**（`DiagnosticError`）：首行 `code=<稳定错误码>`，随后 `message=<说明>`、若干 `字段名=值`、末尾 `hint=<下一步该做什么>`；
+- **单行**（其它 `RouterError`，如规格 JSON 解析失败）：沿用旧文案 `[router error] <说明>`。
+
+结构化错误码见第 16 节。退出码不因错误码变化：仍是上述三个数字，未新增。
 
 ---
 
@@ -639,7 +735,9 @@ python generator/router.py --spec <题号>.generator.json --output-dir <目录> 
 - 默认 router 只有 `router.py` 与 `<题号>.generator.json` **同时存在**才启用；
 - router 一旦启用但报错 → **直接停止，不静默回退**；
 - 选中的数据源会打印 `[data-source] ...`；
-- router 模式**不写 `cases.json`**，只读 `<data_dir>/<题号>/*.in`；
+- router 模式**不写 `cases.json`**；入口是 `router.py` 时只读本次 manifest `files[].in`（`status` 必须为 `ok`、`run_seed` 必须一致），不是目录扫描；
+- 入口是其它外部生成器时仍目录扫描 `<data_dir>/<题号>/*.in` 并打印 `[警告]`；
+- manifest 缺失 / `status` 非 `ok` / `run_seed` 不匹配 / `files[].in` 非法或不存在 / `sha256` 不符 → 一律按 `[数据生成失败]` 终止，不回退目录扫描；
 - 评测记录的元信息会带上「数据来源 / 生成入口 / run_seed / manifest 路径」。
 
 ---
@@ -649,13 +747,40 @@ python generator/router.py --spec <题号>.generator.json --output-dir <目录> 
 | 输出 | 含义 | 处理 |
 |---|---|---|
 | `[data-source] ...` | 本次选中的数据来源 | 先确认选对没有；选错就显式传数据源参数 |
-| `[数据生成失败]` + `entry:` / `exit_code:` / 双流尾部 | 生成入口失败 | 按尾部信息修 spec / cutter / 生成器；此时不会编译用户程序 |
+| `[数据生成失败]` + `entry:` / `exit_code:` + `--- router output (tail) ---` | 生成入口失败。tail 是 stdout 与 stderr **合并**后的首尾片段，首部最多 500 字符、总长最多 2000 字符，不是完整输出 | 按尾部信息修 spec / cutter / 生成器；此时不会编译用户程序；要完整日志请直接跑 router |
 | `[router error] ...` | 路由内部错误（spec 非法、生成器未注册或未编译、`--only` 无匹配、发布失败） | 按提示修 spec 或注册生成器 |
 | `[retry] ...` | 数据流级校验失败后的重试日志 | 多为生成器输出 token 数与 `content[].count` 不符 |
-| 未注册的生成器: xxx；可用: ... | `generation.cases[].generator` 写了没注册的 id | 先在 `registry.py` 登记，或改成已注册 id |
-| 生成器不存在: `.../bin/<kind>/xxx.exe` | 已注册但 exe 没编译 / 放错位置 | 编译到 `generator/bin/<kind>/` |
+| `[router error] code=unsupported-generator` | `--only` 或 `generation.cases[].generator` 写了没注册的 id（多个会聚合成一条） | 先在 `registry.py` 登记并编译，或改成已注册 id；`available=` 给出当前可用列表 |
+| `[router error] code=generator-not-built` | 已注册但 exe 没编译 / 放错位置（预检在建目录、样例回放之前） | 按 `expected=` 编译到 `generator/bin/<kind>/`，或检查 `--generator-root` |
 | 样例回放失败 | cutter 输出与 `samples[].input` 不一致 | 题面样例抄错、cutter 排版错，或 `line_sensitive` 设错 |
 | 样例未经确认 | `confirmed` 不是 `true` | 与人对齐后改 `true` |
+| `[router error] 临时目录已保留: <路径>` | 本轮失败，当前 `.tmp_<run_seed>/` 被保留（含中间 `.in` 与 `.router_tmp`） | 排查完后可手动删除；不要把它当成已发布数据 |
+| `[router error] 临时目录路径已存在且缺少标记，拒绝删除: <路径>` | 当前 `--seed` 的临时目录已存在，但不是 router 建的（缺 `.router_tmp`） | 换 `--seed`，或确认后手动清理该目录 |
+| `[router error] 当前临时目录清理失败: <路径>` | 同 seed 重建前删除带标记的旧目录失败（如被占用） | 关闭占用进程后重试 |
+| `[警告] 历史临时目录清理失败: <路径>` | 启动清理历史 `.tmp_*` 失败，或该目录是 symlink / junction | 不影响本轮生成；需要时手动清理 |
+
+### 16.1 router 结构化错误码
+
+全部由 `DiagnosticError` 抛出，输出形如：
+
+```text
+[router error] code=unsupported-generator
+[router error] message=未注册的生成器: graph_chain
+[router error] generator=graph_chain
+[router error] available=seq_random_small
+[router error] hint=请改用已注册生成器，或由负责人实现、编译并注册该生成器
+```
+
+| code | 触发条件 | 附带字段 |
+|---|---|---|
+| `unsupported-generator` | `--only`、`generation.cases[].generator` 或 `coverage.exclude[].generator` 引用了未注册 id | `generator`、`available`、`hint` |
+| `invalid-coverage` | coverage 的语义错误**统一归这一个码**，具体位置由 `where` 区分：`target_groups` 非正整数、`repeat` 非正整数且非 `"auto"`、`repeat:"auto"` 但缺 `target_groups`、`cases` / `exclude` 不是数组、`exclude[].generator` 缺失或非字符串、`exclude[].generator` 重复、`reason` 为空、`reason_code` 不在枚举内、`evidence` 不是对象 | `where`、`expected`、`actual` |
+| `generator-not-built` | 已注册但 `<generator-root>/<kind>/<exe>` 不存在（预检即失败，不会建目录） | `generator`、`expected`、`available`、`hint` |
+| `unknown-field` | spec 任意层出现白名单外字段 | `where`、`unknown`、`allowed` |
+| `unknown-bind-key` | `generation.cases[].bind` 覆盖了未声明的键（图题只允许 `base_m`，其余只允许 `constraints.variables` 里已声明的变量） | `where`、`unknown`、`allowed` |
+| `invalid-schema` | 某层应为 JSON 对象却给了别的类型（如 `constraints` 写成数组、`bind` 写成数组） | `where`、`expected`、`actual` |
+
+说明：字段值里的换行会被压成空格，保证一条错误只占固定行数、不会伪造额外的 `[router error]` 行。
 
 ---
 
@@ -665,17 +790,19 @@ python generator/router.py --spec <题号>.generator.json --output-dir <目录> 
 
 - 路由全链路：spec 校验 → 绑定 → 写控制 token → 调生成器 → cutter → 校验 → 样例回放 → 发布 → manifest；
 - 序列题型（`kind = sequence`）的绑定、校验、行级校验；
-- 图论 / 字符串的绑定与校验逻辑（生成器尚未实现，暂不可端到端跑通）；
+- 图论 / 字符串的绑定逻辑（`bind_graph` / `bind_string`）与**部分**校验已存在；完整校验仍缺，见下方已知限制；
 - `diff_runner` 粘合：`--generator-exe` 等 4 个新参数、数据来源优先级、不写 `cases.json`。
 
 **已知限制**
 
 - `GENERATORS` 目前只有 `seq_random_small`，且仓库内不保存 exe（`*.exe` 被忽略），需要自行编译后才会是 `ready`；
 - 图论 / 字符串生成器未实现（`graph_chain`、`str_random` 等在注册表里是注释状态）；
-- `publish` 不清理上一轮的旧 `.in`；
-- 生成期失败（spec 非法、生成器失败、样例回放失败）不会写 manifest，只能靠退出码判断；
-- `replay_samples` 在临时目录创建之后执行，回放失败会留下 `.tmp_<run_seed>/`；
-- `--only` 无匹配、`--generator-exe` 未注册等提示文案与旧版文档存在差异。
+- `publish` 不清理上一轮的旧 `.in`；router 模式靠 manifest 隔离旧 `.in`（只加载本次 manifest 列出的文件），非 router 入口仍按目录扫描；
+- 重复数据**只告警不阻塞**：`[verify]` / `[warn]` 不改退出码、不写 manifest；这两行经对拍器运行时不可见（T-050）；
+- `coverage` 的候选集只由「注册表 + `<generator-root>/<kind>/<exe>` 是否存在」决定，注册表自描述（`tier` / `precondition` / `postcondition`）未实现；
+- 生成期失败（spec 非法、生成器失败、样例回放失败）不会写 manifest（`status=ready` 要等生成完成后才写），此时只能靠 `[router error]` 文本与退出码判断；
+- `replay_samples` 在临时目录创建之后执行，回放失败会留下 `.tmp_<run_seed>/`（带 `.router_tmp` 标记，并会打印保留路径）；
+- **图论 / 字符串校验未完成（待 T-044）**：`validate.py` 中 `directed=true` 的重边判定仍用 `(min, max)` 而非 `(u, v)`；没有 `sum(deg) == 2m` 校验；邻接表 `k_mode` 只检查 `cnt < 0`，未完整校验 `k` 与该行内容；`vertex_base = 0` 的邻接表解析与"多余行"检查也尚未补齐。图论 / 字符串生成器本身也还没实现，因此这条链路目前无法端到端跑通。
 
 ---
 

@@ -1,6 +1,6 @@
 # AIOJ 使用说明
 
-**事先声明！本项目的 readme.md、idea、AGENTS.md 由本人起草，其中 `week_log/` 下的题号文件夹是个人测试用代码（含二进制产物）；其余部分由 AI 生成。**
+**事先声明！本项目的 readme.md、idea、AGENTS.md 由本人起草，其中 `week_log/` 下的题号文件夹是个人测试用代码；其余部分由 AI 生成。**
 
 
 一.项目简介
@@ -151,6 +151,7 @@ python <工具目录>\diff_runner\diff_runner.py --name <题号>
 - 找不到工作区配置且只给 `--name` 时，工具会报错并提示复制模板；
 - 如果显式提供全部文件路径，旧命令仍然可以运行；
 - `discussion_records/` 默认整体被 `.gitignore` 忽略；如果希望把某个 `BUGLOG.md` 提交到仓库，需要手动 `git add -f` 或添加 ignore 例外。
+- 可以通过<!--AIOJ-META TL:ML:--\>标签指定每道题的Time Limit 和Memory Limit(后续支持)
 
   
 ### 三.6 新工作流：路由生成 `.in` → cutter 排版 → 对拍器消费
@@ -210,7 +211,7 @@ python <工具目录>\diff_runner\diff_runner.py `
 - [ ] 多解题目
 - [ ] Special Judge外挂
 - [ ] MLE检测
-  该项目目前只支持非交互、批量输入输出的题目；
+  该项目目前只支持非交互、批量输入输出的题目；不支持含语义约束题目
 
 
 

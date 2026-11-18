@@ -44,6 +44,7 @@ generator Python 文件：
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -90,6 +91,10 @@ WORKSPACE_CONFIG_NAME = "aioj.workspace.json"
 # 用户程序 TLE 熔断阈值：--tle-policy stop 时，收集到 5 组用户 TLE 后停止后续用例。
 # 题解 TLE / 参考RE 不受此阈值影响，会立即熔断。
 USER_TLE_CIRCUIT_BREAKER_LIMIT = 5
+
+# 对拍所需题目文件缺失时的退出码。单独占一个值，是因为 2 已经表示
+# “对拍完成但存在非 AC”，调用方（LLM / shell）需要把两者区分开。
+INPUT_MISSING_EXIT_CODE = 3
 
 
 @dataclass
@@ -258,13 +263,20 @@ def load_workspace_config(
 
 
 def find_problem_dir(name: str, workspace: WorkspaceConfig) -> Path:
-    """按 problems_dirs 顺序查找第一个存在的 <题号>/ 文件夹。"""
-    for base in workspace.problems_dirs:
-        candidate = base / name
+    """按 problems_dirs 顺序查找第一个存在的 <题号>/ 文件夹。
+
+    找不到时抛 InputMissingError 而不是 ValueError：题目文件夹缺失属于
+    “输入文件缺失”，要和普通配置错误分成不同退出码，调用方才能据此补齐文件。
+    """
+    searched = [base / name for base in workspace.problems_dirs]
+    for candidate in searched:
         if candidate.is_dir():
             return candidate
-    searched = "\n".join(f"  - {base / name}" for base in workspace.problems_dirs)
-    raise ValueError(f"未找到题目文件夹 {name}/，已按顺序查找:\n{searched}")
+    raise InputMissingError(
+        name,
+        [MissingInput("problem_dir", searched)],
+        searched,
+    )
 
 
 def load_cases_from_json(path: Path) -> list[TestCase]:
@@ -303,6 +315,94 @@ def load_cases_from_in_dir(path: Path, pattern: str = "*.in") -> list[TestCase]:
     return cases
 
 
+def load_cases_from_manifest(
+    manifest_path: Path,
+    output_dir: Path,
+    seed: int | None = None,
+) -> list[TestCase]:
+    """按 manifest 加载 router 生成的数据清单。
+
+    router 模式下 data_dir/<题号>/ 里可能残留上一轮的 .in，目录扫描会把它们
+    一起读进来；manifest 是本次运行的权威清单，所以这里只认 status=ok 且
+    由本次 run_seed 产生的 manifest，任何异常都直接失败、不回退目录扫描。
+    """
+    if not manifest_path.exists():
+        raise GeneratorRunError(f"manifest 不存在: {manifest_path}")
+
+    try:
+        manifest = load_json(manifest_path)
+    except (OSError, ValueError) as exc:
+        raise GeneratorRunError(
+            f"manifest 读取/解析失败: {manifest_path}: {exc}"
+        ) from exc
+
+    if not isinstance(manifest, dict):
+        raise GeneratorRunError(f"manifest 必须是 JSON 对象: {manifest_path}")
+    if manifest.get("schema_version") != 2:
+        raise GeneratorRunError(
+            f"manifest schema_version 不支持: "
+            f"{manifest.get('schema_version')!r}"
+        )
+    if manifest.get("status") != "ok":
+        raise GeneratorRunError(
+            f"manifest status 不是 ok: {manifest.get('status')!r}"
+        )
+    if seed is not None and manifest.get("run_seed") != seed:
+        raise GeneratorRunError(
+            f"manifest run_seed 不匹配: "
+            f"{manifest.get('run_seed')!r} != {seed}"
+        )
+
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files:
+        raise GeneratorRunError("manifest files 为空或格式错误")
+
+    root = output_dir.resolve()
+    seen: set[str] = set()
+    cases: list[TestCase] = []
+
+    for item in files:
+        if not isinstance(item, dict):
+            raise GeneratorRunError(f"manifest files 项格式错误: {item!r}")
+
+        name = item.get("in")
+        if not isinstance(name, str) or not name:
+            raise GeneratorRunError(f"manifest files 项缺少 in: {item!r}")
+
+        rel = Path(name)
+        # 只允许 output_dir 下的纯文件名：拒绝绝对路径、子目录、上跳。
+        if rel.is_absolute() or rel.name != name or ".." in rel.parts:
+            raise GeneratorRunError(f"manifest in 路径非法: {name!r}")
+        if rel.suffix.lower() != ".in":
+            raise GeneratorRunError(f"manifest in 必须是 .in 文件: {name!r}")
+        if name in seen:
+            raise GeneratorRunError(f"manifest in 重复: {name}")
+        seen.add(name)
+
+        path = (output_dir / name).resolve()
+        if path.parent != root:
+            raise GeneratorRunError(f"manifest in 越出输出目录: {name!r}")
+        if not path.is_file():
+            raise GeneratorRunError(f"manifest 列出的 .in 不存在: {path}")
+
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise GeneratorRunError(
+                f"manifest 列出的 .in 读取失败: {path}: {exc}"
+            ) from exc
+
+        expected_hash = item.get("sha256")
+        if expected_hash:
+            actual_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if actual_hash != expected_hash:
+                raise GeneratorRunError(f"manifest sha256 不匹配: {name}")
+
+        cases.append(TestCase(name=path.stem, input=text))
+
+    return cases
+
+
 def load_cases_from_generator(path: Path, seed: int | None) -> list[TestCase]:
     spec = importlib.util.spec_from_file_location("diff_runner_generator", str(path))
     if spec is None or spec.loader is None:
@@ -325,14 +425,100 @@ def load_cases_from_generator(path: Path, seed: int | None) -> list[TestCase]:
 
 
 class GeneratorRunError(Exception):
-    """外部数据生成入口失败。"""
+    """外部数据生成入口失败。output 保存合并后的 tail 文本。"""
+
+    def __init__(self, message: str, output: str = "") -> None:
+        super().__init__(message)
+        # 两路输出已在子进程侧合并，这里只保留首尾片段，避免刷屏也避免丢关键信息。
+        self.output = output
+
+
+@dataclass
+class MissingInput:
+    """一类缺失的对拍输入：role 是用途，paths 是它的候选路径。"""
+
+    role: str
+    paths: list[Path]
+
+
+class InputMissingError(Exception):
+    """对拍所需题目文件缺失。
+
+    用结构化字段携带缺失项与搜索路径，交由顶层 main() 统一输出并返回
+    INPUT_MISSING_EXIT_CODE，避免各处重复打印或直接漏出 traceback。
+    """
+
+    def __init__(self, name: str, missing: list[MissingInput],
+                 searched: list[Path]):
+        super().__init__(f"缺少对拍所需文件: {name}")
+        self.name = name
+        self.missing = missing
+        self.searched = searched
+
+
+def report_input_missing(exc: InputMissingError) -> None:
+    """把同一段 [input-missing] 文本同时写到 stdout 和 stderr。
+
+    写两份是因为调用方可能只读其中一路；两路内容完全一致，便于直接对照。
+    路径统一走 display_path()；已经在 missing 列表出现过的路径，不再作为
+    searched 重复输出，避免同一路径出现两遍。
+    """
+    lines = [f"[input-missing] problem={exc.name}"]
+    shown_missing: set[str] = set()
+    for item in exc.missing:
+        if not item.paths:
+            lines.append(
+                f"[input-missing] missing role={item.role} path=<未指定>"
+            )
+            continue
+        for path in item.paths:
+            shown = display_path(path)
+            shown_missing.add(shown)
+            lines.append(
+                f"[input-missing] missing role={item.role} path={shown}"
+            )
+
+    shown_searched: set[str] = set()
+    for path in exc.searched:
+        shown = display_path(path)
+        if shown in shown_missing or shown in shown_searched:
+            continue
+        shown_searched.add(shown)
+        lines.append(f"[input-missing] searched={shown}")
+
+    lines.append(
+        "[input-missing] hint=请补齐缺失文件，"
+        "或显式传入 --problem-md / --user / --correct"
+    )
+    text = "\n".join(lines)
+    print(text)                   # stdout：给人看，也方便 shell 直接读
+    print(text, file=sys.stderr)  # stderr：给只读 stderr 的调用方
 
 
 def _tail(text: str, limit: int = 2000) -> str:
+    """保留首尾片段，保证总长度不超过 limit。
+
+    旧写法 text[:500] + "..." + text[-limit:] 加起来可达 2505 字符，
+    还会在文本刚好超长时把同一段首部再输出一次；这里按剩余长度补尾部。
+    """
     text = (text or "").strip()
     if len(text) <= limit:
         return text
-    return text[:500] + chr(10) + "..." + chr(10) + text[-limit:]
+    head = 500
+    separator = chr(10) + "..." + chr(10)
+    tail_len = max(0, limit - head - len(separator))
+    if tail_len <= 0:
+        return text[:limit]
+    return text[:head] + separator + text[-tail_len:]
+
+
+def is_router_entry(exe: Path) -> bool:
+    """入口是否为本仓库的 router.py。
+
+    只认文件名 router.py：router 才写 manifest，才需要按 manifest 过滤用例；
+    其它命名为 *_router.py 的外部生成器仍按旧的目录扫描处理。
+    """
+    return exe.name.lower() == "router.py"
 
 
 def run_external_generator(exe, output_dir, seed, timeout,
@@ -340,8 +526,9 @@ def run_external_generator(exe, output_dir, seed, timeout,
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # router.py 是脚本，不能直接执行；原生 exe 直接执行。
+    # -u 让 Python 入口不缓冲，避免进程被杀时丢掉已产生的报错。
     if exe.suffix.lower() == ".py":
-        cmd = [sys.executable, str(exe)]
+        cmd = [sys.executable, "-u", str(exe)]
     else:
         cmd = [str(exe)]
 
@@ -351,30 +538,52 @@ def run_external_generator(exe, output_dir, seed, timeout,
     if manifest is not None:
         cmd += ["--manifest", str(manifest)]
 
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace",
-                              timeout=timeout, cwd=str(exe.parent))
+        # stderr=STDOUT：在子进程侧合并两路，避免先后顺序错乱；run() 内部会
+        # 持续排空管道，不会因缓冲区写满而死锁。stdin=DEVNULL 防止入口误等输入。
+        proc = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            cwd=str(exe.parent),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     except subprocess.TimeoutExpired as exc:
+        raw = exc.output or ""
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
         raise GeneratorRunError(
             f"entry: {exe}"
-            + chr(10) + f"timeout: {timeout}s"
+            + chr(10) + f"timeout: {timeout}s",
+            output=_tail(raw),
         ) from exc
 
     if proc.returncode != 0:
-        parts = [
-            f"entry: {exe}",
-            f"exit_code: {proc.returncode}",
-        ]
-        if proc.stdout.strip():
-            parts.append("--- stdout tail ---")
-            parts.append(_tail(proc.stdout))
-        if proc.stderr.strip():
-            parts.append("--- stderr tail ---")
-            parts.append(_tail(proc.stderr))
-        raise GeneratorRunError(chr(10).join(parts))
+        raise GeneratorRunError(
+            f"entry: {exe}"
+            + chr(10) + f"exit_code: {proc.returncode}",
+            output=_tail(proc.stdout or ""),
+        )
 
-    # MVP：直接读取 output_dir 下所有 .in。
+    # router.py 一定写 manifest：只加载本次 manifest 列出的 .in，避免旧文件混入。
+    if is_router_entry(exe):
+        if manifest is None:
+            raise GeneratorRunError("router.py 模式缺少 manifest 路径")
+        return load_cases_from_manifest(manifest, output_dir, seed)
+
+    # 其它外部入口不写 manifest，只能继续目录扫描；必须提示可能混入旧 .in。
+    print(
+        "[警告] 非 router 外部生成器不校验 manifest，按目录扫描 .in；可能混入旧文件",
+        file=sys.stderr,
+    )
     return load_cases_from_in_dir(output_dir)
 
 
@@ -572,8 +781,20 @@ def write_record(
     record_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+class RunnerArgumentParser(argparse.ArgumentParser):
+    """参数错误统一以 1 退出。
+
+    argparse 默认用 2，但 2 在本工具里已经表示“对拍完成但存在非 AC”，
+    复用会让人把“命令写错”误判成“评测失败”。
+    """
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}" + chr(10))
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="通用 UVA/OJ 对拍器")
+    parser = RunnerArgumentParser(description="通用 UVA/OJ 对拍器")
     parser.add_argument("--config", type=Path, help="旧的 JSON 参数配置文件")
     parser.add_argument("--workspace-config", type=Path, help="工作区配置文件 aioj.workspace.json；缺省时尝试读取当前目录同名文件")
     parser.add_argument("--name", help="题目名，默认取题目 Markdown 文件名")
@@ -616,7 +837,7 @@ def parse_md(path):
     timeout_md = float(tl.group(1)) if tl else None
     return timeout_md
 
-def main() -> int:
+def _main() -> int:
     args = parse_args()
     cwd = Path.cwd()
 
@@ -672,37 +893,43 @@ def main() -> int:
         )
         return 1
 
+    # 无 workspace 的提前返回保留在上面，按负责人确认仍返回 1。
+    searched_paths = [base / name for base in workspace.problems_dirs] if workspace else []
     problem_dir: Path | None = None
+    solution_candidates: list[Path] = []
+
     if workspace is not None and any(p is None for p in (problem_md, user_src, correct_src)):
-        try:
-            problem_dir = find_problem_dir(name, workspace)
-        except ValueError as exc:
-            print(f"[错误] {exc}", file=sys.stderr)
-            return 1
+        problem_dir = find_problem_dir(name, workspace)
         if problem_md is None:
             problem_md = problem_dir / f"{name}.md"
         if user_src is None:
             user_src = problem_dir / f"{name}.cpp"
         if correct_src is None:
-            correct_candidate = problem_dir / f"{name}_correct.cpp"
-            solution_candidate = problem_dir / f"{name}_solution.cpp"
-            correct_src = correct_candidate if correct_candidate.exists() else solution_candidate
+            solution_candidates = [
+                problem_dir / f"{name}_correct.cpp",
+                problem_dir / f"{name}_solution.cpp",
+            ]
+            correct_src = next((p for p in solution_candidates if p.exists()), None)
 
     if problem_dir is None:
         if problem_md is not None:
             problem_dir = problem_md.parent
         elif user_src is not None:
             problem_dir = user_src.parent
+    if problem_dir is not None and problem_dir not in searched_paths:
+        searched_paths.append(problem_dir)
 
-    if problem_md is not None and not problem_md.exists():
-        print(f"[错误] 题目 Markdown 不存在: {problem_md}", file=sys.stderr)
-        return 1
+    # 一次性收集全部缺失项，而不是遇到第一个就返回：调用方补文件时一轮就能补齐。
+    missing: list[MissingInput] = []
+    if problem_md is None or not problem_md.exists():
+        missing.append(MissingInput("problem_md", [problem_md] if problem_md else []))
     if user_src is None or not user_src.exists():
-        print(f"[错误] 用户代码不存在: {user_src}", file=sys.stderr)
-        return 1
+        missing.append(MissingInput("user", [user_src] if user_src else []))
     if correct_src is None or not correct_src.exists():
-        print(f"[错误] 题解代码不存在: {correct_src}", file=sys.stderr)
-        return 1
+        paths = solution_candidates or ([correct_src] if correct_src else [])
+        missing.append(MissingInput("solution", paths))
+    if missing:
+        raise InputMissingError(name, missing, searched_paths)
 
     timeout_md = parse_md(problem_md) if problem_md is not None else None
 
@@ -860,6 +1087,9 @@ def main() -> int:
     except GeneratorRunError as exc:
         print("[数据生成失败]", file=sys.stderr)
         print(exc, file=sys.stderr)
+        if exc.output:
+            print("--- router output (tail) ---", file=sys.stderr)
+            print(exc.output, file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - 把错误友好地展示给调用方
         print(f"[错误] {exc}", file=sys.stderr)
@@ -1018,6 +1248,19 @@ def main() -> int:
         shutil.rmtree(build_dir, ignore_errors=True)
     return 0 if ac == total else 2
 
+
+
+def main() -> int:
+    """顶层入口：只负责把“输入文件缺失”转成统一输出与退出码 3。
+
+    放在最外层，是为了保证任何路径抛出的 InputMissingError 都不会变成
+    traceback，调用方（LLM / shell）总能读到可解析的 [input-missing] 文本。
+    """
+    try:
+        return _main()
+    except InputMissingError as exc:
+        report_input_missing(exc)
+        return INPUT_MISSING_EXIT_CODE
 
 
 if __name__ == "__main__":
