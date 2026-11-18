@@ -42,10 +42,16 @@ def choose(lo: int, hi: int, scale: str, rng: random.Random) -> int:
     return rng.randint(lo, hi)
 
 
-def derive_seed(run_seed: int, generator: str, group_index: int,
-                attempt: int) -> int:
-    text = f"{run_seed}|{generator}|{group_index}|{attempt}"
-    # 仅用于派生 sub_seed，不参与任何完整性校验。
+def derive_seed(run_seed: int, generator: str, ordinal: int,
+                group_index: int, attempt: int) -> int:
+    """派生 sub_seed。
+
+    ordinal = 规则序号（repeat 的每次展开各占一个）。它必须进哈希：
+    否则同一 generator 的多条规则在 T=1 时会派生出同一个 sub_seed，
+    绑定出完全相同的数值，只能靠 repeat 复制凑数。
+    哈希内容只用于派生，不参与任何完整性校验。
+    """
+    text = f"{run_seed}|{generator}|{ordinal}|{group_index}|{attempt}"
     digest = hashlib.sha256(text.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "little") & ((1 << 63) - 1)
 

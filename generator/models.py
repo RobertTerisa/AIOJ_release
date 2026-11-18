@@ -12,6 +12,20 @@ class RetryableError(RouterError): ...
 class FatalError(RouterError): ...
 
 
+class DiagnosticError(RouterError):
+    """带稳定 code 与结构化字段的 router 错误。
+
+    code 是给调用方（LLM / 脚本）判断用的稳定标识；fields 用来携带
+    generator / expected / available / hint 这类可读信息。router 入口会把它们
+    统一渲染成 [router error] 开头的多行文本，便于调用方按 code 分支处理。
+    """
+
+    def __init__(self, code: str, message: str, **fields: Any):
+        super().__init__(message)
+        self.code = code
+        self.fields = fields
+
+
 @dataclass(frozen=True)
 class ProblemSpec:
     path: Path

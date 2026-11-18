@@ -1,6 +1,6 @@
 # Diff Runner 开发日志（整理稿）
 
-> 整理日期：2026-10-11（最近维护：2026-11-02）  
+> 整理日期：2026-10-11（最近维护：2026-11-16）  
 > 整理来源：`develop_log.md`（原文见文末「历史归档」）  
 > 当前版本：v0.2（commit `81de335`）  
 > 当前分支状态：`dev/owner`（截至 `2830e8a`，与 `origin/dev/owner` 同步）  
@@ -21,8 +21,14 @@
 | 题目路径 | 优先 `problems_dirs` 数组；兼容旧的单字符串 `problems_dir` | 已实施 |
 | 多题目路径 | 按 `problems_dirs` 顺序查找首个存在的 `<题号>/` | 已实施 |
 | 题目文件 | `<题号>.md`、`<题号>.cpp`、`<题号>_correct.cpp`，找不到回退 `<题号>_solution.cpp` | 已实施 |
-| 数据来源 | 优先 `<题号>/IN/*.in`；其次配置的 `generators_dir/<题号>_generator.py`；否则报错 | 已实施 |
-| 测试数据落点 | `<data_dir>/<题号>/cases.json` | 已实施 |
+| 数据来源 | 显式 CLI > `<题号>/IN/*.in` > router（`generator/router.py` + `<题号>.generator.json`）> `<题号>_generator.exe` > `<generators_dir>/<题号>_generator.py`；都没有则报错并说明缺什么 | 已实施（T-042 更新） |
+| 测试数据落点 | 旧流程写 `<data_dir>/<题号>/cases.json`；router 模式只写 `<data_dir>/<题号>/*.in`（不写 `cases.json`） | 已实施（T-042 更新） |
+| 对拍器退出码 | `0` 全部 AC；`1` 一般错误（含 CLI 参数错误、编译/数据生成失败）；`2` 对拍完成但存在非 AC；`3` 对拍所需题目文件缺失 | 已实施（T-039） |
+| 缺文件提示 | `[input-missing]` 文本同时写 stdout 与 stderr，列出缺失 role / 路径 / 搜索路径 / hint；题面 `<题号>.md` 按必填处理 | 已实施（T-039） |
+| router 错误输出 | `DiagnosticError` 输出 `code=` / `message=` / 若干字段 / `hint=` 多行；其它 `RouterError` 保持单行文案；不新增数字退出码 | 已实施（T-040） |
+| 生成器预检 | 未注册（`unsupported-generator`）与未编译（`generator-not-built`）在创建目录、样例回放之前失败 | 已实施（T-040） |
+| 生成入口输出回传 | router 的 stdout 与 stderr 合并后按首尾片段部分打印（首部 ≤500、总长 ≤2000 字符），不是原样透传 | 已实施（T-041） |
+| router 临时目录 | `<data_dir>/<题号>/.tmp_<run_seed>/` 带 `.router_tmp` 标记；只清理带标记且非当前 seed 的历史目录；失败保留并打印路径；同 seed 无标记则拒绝删除并退 `2` | 已实施（T-046） |
 | 评测记录落点 | `<records_dir>/<题号>/<题号>_diff_<时间戳>_submission_<次数>.md` | 已实施 |
 | 配置缺省行为 | 只给 `--name` 时提示复制模板；显式给出全部路径时仍可运行 | 已实施 |
 | 仓库卫生 | `.gitignore` 截留私有配置、测试数据、评测记录、讨论记录、`__pycache__`、`*.pyc`、`develop_log.md` | 已实施 |
@@ -81,6 +87,8 @@
 - 旧 CLI 参数保持兼容；显式传入的路径优先于配置。
 - `--dataset`：把测试数据、评测记录放入 `<题号>/<数据集名>/` 子目录。
 - `--cases-out`：显式指定 `cases.json` 输出路径，优先级高于 `--dataset`。
+- 题面 `<题号>.md` 为必填项：缺省时按 `--name` 自动定位，定位不到即报缺失。
+- CLI 参数错误统一以 `1` 退出（覆盖 argparse 默认的 `2`），`2` 只表示“对拍完成但存在非 AC”。
 
 ### 1.4 题目文件定位
 
@@ -91,17 +99,20 @@
 - 用户代码：`<题目目录>/<题号>.cpp`；
 - 题解：`<题目目录>/<题号>_correct.cpp`，找不到则回退 `<题号>_solution.cpp`；
 - 显式 CLI 路径优先于上述推导。
+- 题面、用户代码、题解（含 `_correct.cpp` 与 `_solution.cpp` 两个候选）**一次性收集全部缺失项**，统一输出 `[input-missing]` 并以退出码 `3` 结束；缺失时不编译、不运行、不写评测记录。
 
 ### 1.5 数据来源
 
-- 优先 `<题目目录>/IN/` 中存在 `.in` 文件；
-- 否则使用 `<generators_dir>/<题号>_generator.py`；
-- 兼容查找 `<题目目录>/<题号>_generator.py`；
-- 都没有则清晰报错，说明缺什么，不得编造数据。
+- 优先级（仅在未显式指定数据来源时生效）：显式 CLI > `<题目目录>/IN/*.in` > 默认 router（`generator/router.py` + `<题目目录>/<题号>.generator.json`）> `<题目目录>/<题号>_generator.exe` > `<generators_dir>/<题号>_generator.py`；
+- 都没有则清晰报错，说明缺什么，不得编造数据；
+- 入口为 `router.py` 时**只消费 manifest**：`status` 必须为 `ok`、`run_seed` 必须与本次一致、只加载 `files[].in`（必须是 `.in`、不得越出输出目录），manifest 缺失/非法/文件缺失/`sha256` 不符一律按 `[数据生成失败]` 终止，不静默回退目录扫描；
+- 非 `router.py` 的外部入口不写 manifest，仍按目录扫描并打印 `[警告]`。
 
 ### 1.6 产物落点
 
-- 测试数据：`<data_dir>/<题号>/cases.json`；
+- 测试数据：旧流程写 `<data_dir>/<题号>/cases.json`；router 模式写 `<data_dir>/<题号>/*.in`（不写 `cases.json`）；
+- 生成 manifest：`<records_dir>/<题号>/<题号>_generation_manifest_<时间戳>.json`；
+- router 临时目录：`<data_dir>/<题号>/.tmp_<run_seed>/`（带 `.router_tmp` 标记，成功清理、失败保留并打印路径）；
 - 评测记录：`<records_dir>/<题号>/<题号>_diff_<时间戳>_submission_<次数>.md`；
 - 讨论整理：`<discussion_dir>/<题号>/BUGLOG.md`，由 Agent 手动整理，工具不自动写；
 - 生成器：`<generators_dir>/<题号>_generator.py`；
@@ -158,35 +169,28 @@ Agent 在输出任何对拍/测评结果时，必须明确声明：
 
 ## 2. 当前待办
 
-> 最后复核日期：2026-11-02  
+> 最后复核日期：2026-11-17  
 > 排序规则：先按状态（待确认 → 待实施），再按优先级（高 → 中 → 低）。  
 > 未明确完成、取消或被取代的待办不删除，只更新「最近复核」日期。
 
 | ID | 事项 | 状态 | 优先级 | 执行人 | 发起者 | 创建日期 | 最近复核 | 来源 | 备注 |
 |---|---|---|---|---|---|---|---|---|---|
 | T-001 | 实现题面 `AIOJ-META` 中 `TL` 的解析 | 待实施 | 高 | RobertTerisa | RobertTerisa | 2026-10-11 | 2026-10-12 | 21.3 / 21.4 | 后续复用同一注释块解析 `ML` |
-| T-005 | `diff_runner` 生成的评测记录 Markdown 在「说明」部分自动加入免责声明 | 待实施 | 高 | RobertTerisa | RobertTerisa | 2026-10-11 | 2026-10-13 | 21.6 | 曾误标「已完成」（见 §4.5），经代码核对实际未实现；优先级为还原时推断 |
 | T-033 | 把检查文件缺漏的功能从 AGENTS.md 转移到对拍器 | 待实施 | 高 | RobertTerisa | RobertTerisa | 2026-10-17 | 2026-10-17 | 本次新增 | 负责人 2026-10-17 提出 |
-| T-036 | 制作数据生成器路由，通过json传递参数 | 待实施 | 高 | RobertTerisa | RobertTerisa | 2026-10-22 | 2026-10-22 | 本次新增 | 负责人 2026-10-22 提出 |
 | T-014 | 编写自己的通用数据生成器、极端数据生成器。确定 LLM 自行编写数据生成器的边界 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-11 | 2026-10-12 | 本次新增 | 按负责人要求调整内容 |
 | T-030 | 理清对拍器代码，运行逻辑 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-13 | 2026-10-13 | 本次新增 | 负责人 2026-10-13 提出 |
-| T-031 | 加入教学过程泄压阀 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-16 | 2026-10-16 | 本次新增 | 负责人 2026-10-16 提出 |
-| T-032 | 加入对拍前LLM询问数据范围是否有错漏，确认无误后加入题面的标签里 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-17 | 2026-10-17 | 本次新增 | 负责人 2026-10-17 提出 |
 | T-034 | 增加链表（邻接表，有边权，无边权）数据生成器 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-19 | 2026-10-19 | 本次新增 | 负责人 2026-10-19 提出 |
 | T-035 | 增加哈希冲突的序列数据生成器 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-19 | 2026-10-19 | 本次新增 | 负责人 2026-10-19 提出 |
 | T-037 | 增加迁移流程 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-26 | 2026-10-26 | 本次新增 | 负责人 2026-10-26 提出 |
 | T-038 | 编写数据校验器 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-26 | 2026-10-26 | 本次新增 | 负责人 2026-10-26 提出。校验生成器产出的 `.in` 是否符合 `<题号>.generator.json` 的规格（行数/长度/取值范围/T 组数），不符则判失败并终止评测，防止「生成器不照规格写、路由器无从发现」。与 T-014 相关：数据生成器后续由负责人手写补充，LLM 现写仅为过渡方案 |
-| T-039 | 新增对拍器缺失文件报错知会LLM | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-30 | 2026-10-30 | 本次新增 | 负责人 2026-10-30 提出。`diff_runner` 找不到 `<题号>.md` / `<题号>.cpp` / 题解文件时，把缺失项与搜索路径一次性输出到 CLI，供 LLM 读取后补齐文件。验收细节：使用 `[input-missing]` 前缀；stdout 和 stderr 都输出；列出完整搜索路径和缺失项。 |
-| T-040 | 新增路由不支持数据生成器知会LLM | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-30 | 2026-10-30 | 本次新增 | 负责人 2026-10-30 提出。路由遇到未注册或未编译的生成器时输出清晰的 `[router error]` 文本（含 generator / available / hint 等字段），`diff_runner` 原样输出到 CLI，供 LLM 据此实现并注册生成器 |
-| T-041 | 实现路由错误输出与对拍器错误透传 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-30 | 2026-10-30 | 本次新增 | 负责人 2026-10-30 提出。覆盖 `[router error]` 文本输出、`diff_runner` 合并 stdout/stderr 并原样透传；与 T-040 相关，实施时可合并 |
-| T-042 | 让 diff_runner 只消费 status=ok 的 manifest 且只加载 manifest 列出的 `.in` | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-30 | 2026-10-30 | 本次新增 | 负责人 2026-10-30 提出。`run_external_generator()` 成功后不直接扫目录，而是读取 manifest：`status` 必须为 `ok`，且只加载 `files[].in`；避免 `test_data` 下旧 `.in` 混入，失败时终止评测 |
 | T-044 | 补全图论校验语义 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-30 | 2026-10-30 | 本次新增 | 负责人 2026-10-30 提出。包括：有向简单图重边判定改为 `(u, v)`；明确并实现 `sum(deg)` / 邻接表 `k` 校验；覆盖 `vertex_base = 0` 的邻接表解析；`validate_lines()` 检查多余行。与 T-043 的度数校验项相关，实施时合并 |
 | T-045 | 修正 line_sensitive=true 的字符串校验 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-30 | 2026-10-30 | 本次新增 | 负责人 2026-10-30 提出。包括：`emit="string"` 不按 token 数校验，按整行内容校验；保留空行，不过滤；检查字符串实际长度；循环结束后检查多余行；`verify_content()` 的 lines 分支同步 |
-| T-046 | 明确 router 临时目录的生命周期与清理策略 | 待实施 | 中 | RobertTerisa | RobertTerisa | 2026-10-30 | 2026-10-30 | 本次新增 | 负责人 2026-10-30 提出。包括：成功发布后清理当前 `.tmp_*`；失败时保留并打印路径；清理历史 `.tmp_*`；或把临时目录移出 `test_data/<题号>/`；与“`test_data/<题号>/` 只有 `.in`”的验收统一 |
 | T-006 | 实现 MLE / 参考 MLE 检测（使用WSL沙箱实现） | 待实施 | 低 | RobertTerisa | RobertTerisa | 2026-10-11 | 2026-10-12 | 20.6 / 21.4 | 后续复用 `AIOJ-META` 的 `ML` 字段 |
-| T-043 | 统一 `generator/Readme.md` 的文档表述与参考实现（manifest 位置、生成器错误文案、度数校验） | 待实施 | 低 | RobertTerisa | RobertTerisa | 2026-10-30 | 2026-11-02 | 本次新增 | 负责人 2026-10-30 提出。包括：架构图 manifest 应画在 `evaluation_records`；验收“已注册但未编译”与“生成器不存在”文案对齐；11.3 的 `sum(deg) == 2m` / 邻接表 `k` 校验补 TODO 或等图论阶段；阶段编号 10→12、17→19 重编号；**2026-11-02 更新**：`generator_operation.md` 已改写成 `generator/Readme.md`，其中 Agent 开发动作与 19.x 源码章节已移除，故“阶段编号重编号”一项失效，其余项继续有效 |
 | T-047 | 根据 yunhuier 的 week1 日志优化提示词 | 待实施 | 低 | RobertTerisa | RobertTerisa | 2026-10-31 | 2026-10-31 | 本次新增 | 负责人 2026-10-31 提出。参考材料位于 `week_log/yunhuier/week1/`（实际文件为 `week1_task.md`，无 week1 日志文件） |
 | T-048 | 统一 simple 图容量语义：`bind_graph` 的 `base_m` 分支补容量校验，或改写对应验收表述 | 待实施 | 低 | RobertTerisa | RobertTerisa | 2026-11-02 | 2026-11-02 | 本次新增 | 负责人 2026-11-02 提出。来源：阶段 1 落地 `generator/bind.py`。冲突点：19.18 要求「`bind_graph` 在 `simple` 且 `m > n(n-1)/2` 时报 `BindError`」，但 19.3 参考实现只在 `m` 的**下界**超容量时报错，`m` 上界超容量被静默裁剪到容量；且 `bind` 内写 `base_m` 时完全不校验容量。经代码核对：`n=5`、`simple=true`、`base_m="n*(n-1)"` 会不报错地产出 `m=20`（无向简单图容量为 10）。阶段 1 按参考实现原样落地，未擅自改行为。**2026-11-02 更新**：原 `generator_operation.md` 19.18 / 19.3 已随文档改写为 `generator/Readme.md` 而不再存在，本条锚点改为代码与测试（`generator/bind.py` 的 `bind_graph`、`generator/tests/test_bind.py`）。待定：在 `base_m` 分支补容量校验，或明确「超上界裁剪、下界不可行才报错」为最终语义 |
+| T-049 | 确认随机小和随机大生成逻辑被区分 | 待实施 | 低 | RobertTerisa | RobertTerisa | 2026-11-02 | 2026-11-02 | 本次新增 | 负责人 2026-11-02 提出 |
+| T-050 | `diff_runner` 在 router **成功**时透传 `[verify]` / `[warn]` 行，使唯一性信息进入 CLI 输出与评测记录 | 待实施 | 低 | RobertTerisa | RobertTerisa | 2026-11-17 | 2026-11-17 | agent_development_new.md §6 D3.1 | 只透传以 `[verify]` / `[warn]` 开头的行；不改 `[data-source]` / `[gen]` 文案、不改退出码、不改 CLI 参数与输出格式。原因：`run_external_generator()` 只在入口返回码非 0 时拼接 stdout/stderr，成功时两条流被丢弃（2026-11-17 实测：端到端 AC 轮次的 CLI 输出与评测记录里 `[gen]` / `[verify]` / `[warn]` 均不出现），导致唯一性与 coverage 账本只在直接运行 `router.py` 时可见 |
+| T-051 | router 支持 `generation.coverage`：生成器默认全跑 + 否决清单，消灭「spec 漏写即静默消失」 | 部分实施 | 低 | 待指定 | 待指定 | 2026-11-17 | 2026-11-17 | agent_development_new.md §3 | 代码已落地、自测通过、待验收（执行人待负责人补填）。实现：`router.py` 的 `expand_coverage()` / `_report_coverage()` / `_verify_evidence()` / `_check_plan()` / `_expect_list()` / `_dup_groups()`，以及 `generation.cases[]` 变可选、`cases[].name` 用例标签、manifest 新增可选字段 `files[].name` 与顶层 `coverage`；coverage 语义错误统一 `code=invalid-coverage`，`exclude[].generator` 未注册复用 `unsupported-generator`；`repeat:"auto"` 必须显式声明 `target_groups`（普通/图论 50，搜索类 20）。唯一性（`[verify]` / `[warn]`）与 `ordinal` 进种子属于 T-051 同期落地的 §2 任务 A，见 `generator/Readme.md` §12。实施顺序 B → A → C |
 
 ---
 
@@ -317,6 +321,7 @@ Agent 在输出任何对拍/测评结果时，必须明确声明：
 ### 4.8 待办处理记录（2026-11-02）
 
 - T-048：新增。负责人要求把「`generator_operation.md` 19.18 验收条目与 19.3 `bind_graph` 参考实现在 simple 图容量上不一致」记入待办，优先级低，执行人与发起人均为 RobertTerisa。该冲突在阶段 1 落地 `generator/bind.py` 时发现，已用代码核对；阶段 1 交付物按 19.3 参考实现原样落地，未擅自改行为，待负责人决定补齐容量校验或改写 19.18 验收条目。
+- T-049：新增。负责人要求确认随机小和随机大生成逻辑被区分，优先级低，执行人与发起人均为 RobertTerisa。
 
 ### 4.9 关键决策登记（2026-11-02）
 
@@ -327,6 +332,31 @@ Agent 在输出任何对拍/测评结果时，必须明确声明：
 - 负责人要求把 `generator_operation.md` 改写为数据生成器 Readme：移除「Agent 开发动作」（原 §0）与「具体源代码实现」（原 §19）两大部分，其余内容整理为使用文档，并移入 `generator/Readme.md`（新增第 5 节「C++ 生成器参数规格」，当前仅支持序列生成器参数）。原 `generator_operation.md` 已删除。
 - 连带调整：`generator/cpp/common.h` 头部注释改指 `generator/Readme.md` 第 5 节；`develop_log.md` 中 T-043、T-048、D-023-01 对旧文件名的引用已改锚到 `generator/Readme.md` 或代码/测试。
 - 待确认：`.gitignore` 中仍保留 `generator_operation.md` 一行（已无对应文件），是否删除待负责人决定。
+
+### 4.11 待办处理记录（2026-11-12）
+
+- T-005：已完成。旧状态「待实施」→「已完成」，依据：负责人 2026-11-12 指令更新；经代码核对，`diff_runner/diff_runner.py` 的 `write_record()` 已在评测记录「说明」段写入“评测记录仅代表本机结果，不反映实际OJ评测结果。”。已从 §2 当前待办移除。
+- T-036：已完成。旧状态「待实施」→「已完成」，依据：负责人 2026-11-12 指令更新；`generator/router.py` 等路由实现已存在。已从 §2 当前待办移除。
+- T-031：已完成。旧状态「待实施」→「已完成」，依据：负责人 2026-11-12 指令更新；`AGENTS.md` 的 A2-8 已包含「熔断机制（防认知过载）」。已从 §2 当前待办移除。
+- T-032：已完成。旧状态「待实施」→「已完成」，依据：负责人 2026-11-12 指令更新；`AGENTS.md` 已包含第 1.5 节「对拍前样例确认」及第 2.3 节「先说明假设、等待用户确认」。已从 §2 当前待办移除。
+
+### 4.12 待办处理记录（2026-11-16）
+
+- 主题：T-039 / T-040 / T-041 / T-042 / T-043 / T-046 六项状态回写为「已完成」。
+- 依据：本轮实现已完成自测（含端到端脚本），并按「代码实际行为优先」逐条核对文档。以下各项均经代码核对：
+
+| ID | 旧状态 → 新状态 | 落地内容 | 验收依据（代码核对） |
+|---|---|---|---|
+| T-039 | 待实施 → 已完成 | 缺文件结构化报错与退出码分层 | `INPUT_MISSING_EXIT_CODE=3`、`MissingInput`、`InputMissingError`、`report_input_missing()`；`find_problem_dir()` 抛结构化异常；`main()`→`_main()` + 顶层包装；`RunnerArgumentParser.error()` 退 `1`；三件套一次性收集缺失项；`AGENT_USAGE.md` §九/§十 与 `README.md` 退出码表同步 |
+| T-040 | 待实施 → 已完成 | router 结构化错误码 + schema 白名单 | `models.DiagnosticError`；`registry.available_generator_ids()` 与 `get_generator()` 改抛结构化错误；`router._emit_router_error()` / `_sanitize()` / `_check_unknown()`；`load_spec()` 的 `generation.cases[].bind` 键白名单；`_require_registered_generators()` 与生成器 exe 预检（早于建目录与样例回放）；5 个错误码 `unsupported-generator` / `generator-not-built` / `unknown-field` / `unknown-bind-key` / `invalid-schema` 已写入 `generator/Readme.md` §14/§16/§16.1 |
+| T-041 | 待实施 → 已完成 | 生成入口输出合并与 tail 截断 | `GeneratorRunError.output`；`run_external_generator()` 用 `stdin=DEVNULL` / `stderr=STDOUT` / `PYTHONIOENCODING=utf-8` / Python 入口 `-u`；`_tail()` 总长 ≤2000 且首尾不重叠；`main()` 打印 `--- router output (tail) ---`；文档统一改为「合并后的首尾片段部分打印，非原样透传」 |
+| T-042 | 待实施 → 已完成 | router 模式只消费 `status=ok` 的 manifest | `import hashlib`；`is_router_entry()`（只认 `router.py`）；`load_cases_from_manifest()`（schema/status/run_seed/files/路径安全/后缀/重复/读取/sha256 全链路校验，失败抛 `GeneratorRunError`）；`run_external_generator()` 成功分支按入口类型分流，native 入口保留目录扫描并打印 `[警告]`；旧 `.in` 不删除 |
+| T-046 | 待实施 → 已完成 | router 临时目录生命周期与清理策略 | `ROUTER_TMP_MARKER`；`cleanup_stale_tmp()`（只清带标记且非当前 seed 的 `.tmp_*`，symlink/junction 不跟随，失败打印 `[警告]`）；当前 seed 目录缺标记时拒绝删除并退 `2`；成功清理失败打印 `[警告] 临时目录清理失败（数据已发布）`；失败保留并打印 `[router error] 临时目录已保留: <路径>`（同一轮只打印一次） |
+| T-043 | 待实施 → 已完成 | 文档与现行代码对齐 | 已修正 §2.1 目录树（区分「当前实际结构」与「规划未创建」，列出 5 个 `cpp/sequence/*.cpp`）、§5.2 生成器失败尾部说明、§14 退出码覆盖范围、§17 图论/字符串校验「部分已实现 + 待 T-044」；T-040/041/042/046 的文案变更已同步 |
+
+- 连带更新：§0 摘要表新增「对拍器退出码 / 缺文件提示 / router 错误输出 / 生成器预检 / 生成入口输出回传 / router 临时目录」六行，并更新「数据来源」「测试数据落点」两行；§1.3 / §1.4 / §1.5 / §1.6 同步为现行行为。
+- 验收状态：代码与文档均已自测通过（T-039 回归套件 24/24；各待办的分项自测见 agent_development.md 对应条目），**尚未提交**，等待负责人验收后再按主题分别 commit。
+- 未处理（仍留在 §2 待办）：T-044（补全图论校验语义）、T-045（修正 `line_sensitive=true` 字符串校验）以及其余低优先级项。
 
 ## 5. 历史归档
 

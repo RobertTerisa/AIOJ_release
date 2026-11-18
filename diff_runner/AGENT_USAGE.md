@@ -63,7 +63,7 @@ diff_runner\sample_config.json
 |---|---|---|
 | `--config` | JSON 配置文件 | 无 |
 | `--name` | 题目名 | 题目 Markdown 文件名 |
-| `--problem-md` | 题目 Markdown 文件 | 无 |
+| `--problem-md` | 题目 Markdown 文件（必填；用工作区配置时可省略，由 `--name` 自动定位） | 无 |
 | `--user` | 用户代码 `.cpp` | 无 |
 | `--correct` | 题解代码 `.cpp` | 无 |
 | `--in-dir` | 包含 `.in` 文件的目录 | 无 |
@@ -107,7 +107,8 @@ python diff_runner\diff_runner.py `
 - 入口是 `.py` 时对拍器用 `sys.executable` 调用；入口是原生 `.exe` 时直接执行；
 - 对拍器会自动追加 `--seed` / `--output-dir` / `--params` / `--manifest` 四个参数，`cwd` 设为入口所在目录；
 - `--seed` 不传时由对拍器生成 `run_seed`，并写入评测记录；
-- 生成成功后只读取 `<data_dir>\<题号>\*.in`（MVP 不按 manifest 过滤）；
+- 入口是 `router.py` 时：**只加载本次 manifest `files[].in` 列出的用例**（`status` 必须是 `ok`，`run_seed` 必须与本次一致），目录里的旧 `.in` 不参与评测；manifest 缺失 / 非 `ok` / `run_seed` 不匹配 / 列出的 `.in` 不存在或哈希不符 → 整轮失败，不静默回退到目录扫描；
+- 入口是其它外部生成器（如 `xxx_router.py`、原生 `exe`）时：仍按目录扫描 `<data_dir>\<题号>\*.in`，并打印 `[警告]` 提示可能混入旧文件；
 - 该模式**不写** `cases.json`。
 
 ### 2.4 数据来源优先级（软绑死）
@@ -486,10 +487,44 @@ evaluation_records\<题目名>\<题目名>_diff_<时间戳>_submission_<次数>.
 |---|---|---|
 | 最终 `.in` | `<data_dir>\<题号>\*.in` | 由 router 发布，目录内不应出现其它临时文件 |
 | `cases.json` | **不写** | router 模式由 `--generator-exe` 触发，强制关闭 |
-| 生成 manifest | `<records_dir>\<题号>\<题号>_generation_manifest_<时间戳>.json` | 含 `status`（ready/ok/failed）与每个 `.in` 的 sha256 |
+| 生成 manifest | `<records_dir>\<题号>\<题号>_generation_manifest_<时间戳>.json` | router 模式的数据清单：`status`（ready/ok/failed）、`run_seed`、`files[].in`（必须是 `.in` 文件名）与可选 `sha256`；对拍器只认 `status=ok` 且 `run_seed` 匹配的清单 |
 | 评测记录 | `<records_dir>\<题号>\<题号>_diff_<时间戳>_submission_<次数>.md` | 元信息含数据来源 / 生成入口 / run_seed / manifest 路径 |
 
 旧流程（`--in-dir` / `--generator`）行为不变：仍然写 `<data_dir>\<题号>\cases.json`。
+
+router 失败时不会清理 `<data_dir>\<题号>\.tmp_<run_seed>\`，并在 stderr 打印 `[router error] 临时目录已保留: <路径>`；下次启动只清理带 `.router_tmp` 标记的历史 `.tmp_*`，无标记目录不碰。
+
+manifest 里的路径只允许是 `output_dir` 下的纯文件名：出现绝对路径、子目录、`..`、重复项都会判失败；列出的 `.in` 读取失败或 `sha256` 不符同样判失败，均以 `[数据生成失败]` 呈现。
+
+### 8.3 router 自己的日志行（`[coverage]` / `[verify]` / `[warn]`）
+
+router 在生成阶段还会打这些行，它们**不是错误、不改退出码**：
+
+| 行 | 通道 | 含义 |
+|---|---|---|
+| `[coverage] 候选 N = 覆盖 A + 否决 B + 跳过 C` | stdout | 覆盖率账本第一行：候选生成器总数如何被分解 |
+| `[coverage] 规则 R 条 = 人工 M + 默认计划 P；目标 T 组，实际 G 组（repeat: auto -> …）` | stdout | 账本第二行：本轮为什么是 G 组 |
+| `[coverage][warn] 实际 G 组 < 目标 T 组：…` | stdout | 人工样例不足且没有可补的候选（不阻塞） |
+| `[coverage][legacy] 白名单模式，不保证全覆盖` | stdout | spec 未写 `generation.coverage`，走旧 `cases[]` 白名单 |
+| `[coverage][exclude] <id>: <reason>` | stderr | 每条否决都会打，用来核对「减法」 |
+| `[coverage][plan] <id>: repeat=N` | stderr | 默认计划补齐的每条规则 |
+| `[coverage][skip] <id>: 不在候选集（kind 不符或生成器未编译）` | stderr | 否决清单里写了非候选 id（不报错） |
+| `[coverage][skipped] --only 生效，覆盖率统计不完整` | stderr | `--only` 下账本数字会偏小，属正常 |
+| `[coverage][evidence][warn] … 找不到: '…'` | stderr | 否决理由引用的原文不在题面里（只提示） |
+| `[verify] N 份数据 / M 份互不相同` | stdout | 发布前唯一性统计 |
+| `[warn] 存在 N-M 份重复数据，已放行（不阻塞发布）` + `[warn] 重复: a.in == b.in …` | stderr | 重复只告警：不改退出码、不写 manifest |
+
+> ⚠️ **经对拍器运行时以上这些行都看不到**：router 成功时 `run_external_generator()` 直接返回 manifest 解析结果，
+> 子进程的 stdout / stderr 都被丢弃（只有入口返回码非 0 时才打印合并后的 tail）。想看这些行请直接运行：
+
+```powershell
+python generator\router.py --spec <题目目录>\<题号>.generator.json `
+  --output-dir <data_dir>\<题号> --seed 12345 `
+  --manifest <records_dir>\<题号>\<题号>_manifest.json
+```
+
+因此端到端跑 `diff_runner` 时，只能靠 `[data-source]`、AC/非 AC 与评测记录里的 manifest 路径来判断，
+**不要因为「没看到 `[verify]`」就判失败**。让这两行透传进 CLI 与记录是另一张工单（T-050）。
 
 ## 九、工作区配置（v2，推荐）
 
@@ -514,7 +549,7 @@ python <工具目录>\diff_runner\diff_runner.py `
 如果当前目录就是工作区根目录，可省略 `--workspace-config`。
 
 4. 自动定位规则：
-   - 题面：`<problems_dirs 命中的题目目录>/<题号>.md`
+   - 题面：`<problems_dirs 命中的题目目录>/<题号>.md`（必填；缺失时直接返回退出码 `3`）
    - 用户代码：`<题号>.cpp`
    - 题解：`<题号>_correct.cpp`，找不到回退 `<题号>_solution.cpp`
    - 数据：优先 `<题号>/IN/*.in`；否则 `<generators_dir>/<题号>_generator.py`
@@ -525,14 +560,22 @@ python <工具目录>\diff_runner\diff_runner.py `
    - `--dataset <名称>`：把测试数据和记录放进 `<题号>/<名称>/` 子目录；
    - `--cases-out <路径>`：显式指定 `cases.json` 输出路径，优先级高于 `--dataset`。
 7. 旧命令（显式传 `--problem-md/--user/--correct/--in-dir/--generator`）仍然兼容。
+8. 缺文件与参数错误的返回约定：
+   - 题目文件缺失（题面 / 用户代码 / 题解两候选 / 题目目录本身）：输出 `[input-missing]`，stdout 与 stderr 各一份，返回退出码 `3`；缺失时**不编译、不运行、不写评测记录**；
+   - 无工作区配置且无法自动定位题目文件：保持旧行为，打印错误并返回 `1`，不走 `[input-missing]`；
+   - CLI 参数错误（如 `--badflag`）：打印 usage 与错误信息后返回 `1`；`2` 只表示“对拍完成但存在非 AC”。
 
 ## 十、失败输出对照
 
 | 前缀 | 出现位置 | 含义 | 处理 |
 |---|---|---|---|
+| `[input-missing] ...` | 对拍器 stdout **和** stderr 各一份 | 对拍所需题目文件缺失：题目目录、题面、用户代码、题解（`_correct.cpp` 与 `_solution.cpp` 两个候选都列）；退出码 `3` | 补齐缺失文件，或显式传 `--problem-md` / `--user` / `--correct`；此时**不会编译、不会运行、不写评测记录** |
 | `[data-source] ...` | 对拍器 stdout | 本次实际选中的数据来源 | 先确认是否选对；选错时显式传数据源参数 |
-| `[数据生成失败]` | 对拍器 stderr | 外部生成入口（router 或 exe）失败，后面跟 `entry:` / `exit_code:` / `--- stdout tail ---` / `--- stderr tail ---` | 按尾部信息修 `<题号>.generator.json` / `<题号>.cutter.py` / 生成器注册；此时**不会编译和运行**用户程序 |
-| `[router error] ...` | router stderr（由对拍器原样带出） | 路由内部错误：spec 非法、生成器未注册或未编译、`--only` 无匹配、发布失败 | 按提示修 spec 或注册生成器；router 报错时对拍器不会静默回退 |
+| `[数据生成失败]` | 对拍器 stderr | 外部生成入口（router 或 exe）失败，后面跟 `entry:` / `exit_code:`，以及一段 `--- router output (tail) ---`：router 的 **stdout 与 stderr 已合并**后的首尾片段，总长最多 2000 字符 | 按尾部信息修 `<题号>.generator.json` / `<题号>.cutter.py` / 生成器注册；此时**不会编译和运行**用户程序 |
+| `[router error] ...` | router 输出（对拍器按合并后的首尾片段部分打印，不是原样透传） | 路由内部错误。带 `code=` 时为多行结构化输出：spec 非法（`invalid-schema` / `unknown-field` / `unknown-bind-key`）、生成器未注册（`unsupported-generator`，含 `coverage.exclude[].generator` 引用了未注册 id）或未编译（`generator-not-built`）、coverage 语义错误（`invalid-coverage`，用 `where=` 区分具体位置）、`--only` 无匹配、发布失败 | 先按 `code=` 分支处理：修 spec，或实现 / 编译 / 注册生成器；router 报错时对拍器不会静默回退。退出码不新增，仍为 `1` |
 | `[retry] ...` | router stderr | 数据流级校验失败后的重试日志（最多 3 次） | 多为此前生成器输出 token 数与 `content[].count` 不符 |
+| `[warn] ...` | router stderr（直接运行 router 时；经对拍器不可见） | **不是失败**：`[warn] 存在 N-M 份重复数据，已放行（不阻塞发布）` 表示发布前的唯一性统计发现重复数据，router 仍退出 `0` 并正常发布；`[warn] 重复: a.in == b.in …` 逐组列出重复文件 | 无需处理；可行域小于组数的题出现重复属正常，不要为此改 spec 或用 `repeat` 复制凑数 |
 
-排查顺序建议：先看 `[data-source]` 是否选中预期来源 -> 再看 `[数据生成失败]` / `[router error]` 的尾部 -> 最后才怀疑用户代码。
+`[router error]` 带 `code=` 时是多行输出：`code=` / `message=` / 若干 `字段名=值` / `hint=`；字段值里的换行会被压成空格。对拍器在子进程侧把 router 的 stdout 与 stderr 合并成一路，再按首尾片段部分打印（首部最多 500 字符，总长最多 2000 字符），所以 `--- router output (tail) ---` 里两路内容会按产生顺序混排，且**不是完整输出**；需要完整日志时请直接运行 router。
+
+排查顺序建议：先看有没有 `[input-missing]`（有就先补齐文件）-> 再看 `[data-source]` 是否选中预期来源 -> 再看 `[数据生成失败]` / `[router error]` 的尾部 -> 最后才怀疑用户代码。
