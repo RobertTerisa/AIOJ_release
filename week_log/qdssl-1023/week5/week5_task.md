@@ -1,0 +1,33 @@
+
+# 每周任务发布模板
+
+> **用途**：记录下周任务清单。
+> **使用方法**：
+> 1. 复制到 `week_log/<执行者的目录>/<日期>_第X周任务日志.md`；
+> 2. 证据统一放入week_log/Github用户名/week(X)/artifacts；
+> 3. 日志中不要粘贴 API Key、token、私钥、`aioj.workspace.json` 原文或完整本机绝对路径。
+> 4. 每周任务所需要的材料（含二进制产物）统一放入week_log/Github用户名/week(X)/materials；仓库内不得放置题目文件
+
+---
+
+## 0. 元信息
+
+| 字段 | 内容 |
+|---|---|
+| 负责人 | qdssl-1023 |
+| 任务批次 | 第5周(2026.11.19) |
+| 仓库地址 | `https://github.com/RobertTerisa/AIOJ_release.git` |
+| 分支 | dev/diff_runner |
+
+
+---
+
+## 1. 每周任务
+- 新建data_class.py , 将TestCase类， RunResult类，WorkspaceConfig类从diff_runner中移出，并通过import导入到diff_runner。
+- 新建config.py , 将WORKSPACE_CONFIG_NAME , USER_TLE_CIRCUIT_BREAKER_LIMIT,INPUT_MISSING_EXIT_CODE移动到其中，通过import导入diff_runner
+- 新建readmd.py将读取题面信息的函数移动到该文件中并通过import导入diff_runner
+- 新建data_generation.py,将week4整理的数据生成的相关函数除去load_cases_from_json和run_external_generator以外全部移动到该文件内通过import导入diff_runner
+- 走一遍完整对拍流程保证对拍器仍然可用。
+
+## 2.注意事项
+ - 仅搬运和导入库的改动，不对函数内部和函数名称实现改动。
