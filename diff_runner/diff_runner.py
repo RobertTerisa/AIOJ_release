@@ -45,8 +45,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
-import inspect
 import json
 import os
 import re
@@ -59,62 +57,26 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
+
+from config import (
+    INPUT_MISSING_EXIT_CODE,
+    USER_TLE_CIRCUIT_BREAKER_LIMIT,
+    WORKSPACE_CONFIG_NAME,
+)
+from data_class import RunResult, TestCase, WorkspaceConfig
+from data_generation import (
+    load_cases_from_generator,
+    load_cases_from_in_dir,
+    normalize_case_list,
+)
+from readmd import parse_md
 
 # Windows 控制台/管道下显式使用 UTF-8，避免中文乱码。
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
-
-
-@dataclass
-class TestCase:
-    name: str
-    input: str
-
-
-@dataclass
-class RunResult:
-    status: str          # done / timeout
-    exit_code: int | None
-    stdout: str
-    stderr: str
-    elapsed: float
-    input_path: Path
-    stdout_path: Path
-    stderr_path: Path
-
-
-WORKSPACE_CONFIG_NAME = "aioj.workspace.json"
-
-# 用户程序 TLE 熔断阈值：--tle-policy stop 时，收集到 5 组用户 TLE 后停止后续用例。
-# 题解 TLE / 参考RE 不受此阈值影响，会立即熔断。
-USER_TLE_CIRCUIT_BREAKER_LIMIT = 5
-
-# 对拍所需题目文件缺失时的退出码。单独占一个值，是因为 2 已经表示
-# “对拍完成但存在非 AC”，调用方（LLM / shell）需要把两者区分开。
-INPUT_MISSING_EXIT_CODE = 3
-
-
-@dataclass
-class WorkspaceConfig:
-    """aioj.workspace.json 的解析结果。
-
-    所有路径都已转为绝对路径；找不到工作区配置时整个对象为 None，
-    此时调用方必须保持旧的显式参数行为。
-    """
-
-    config_path: Path
-    workspace: Path
-    problems_dirs: list[Path]
-    generators_dir: Path
-    discussion_dir: Path
-    records_dir: Path
-    data_dir: Path
-    timeout: float | None
-    compiler: str | None
-    std: str | None
 
 
 def project_root() -> Path:
@@ -288,33 +250,6 @@ def load_cases_from_json(path: Path) -> list[TestCase]:
     return normalize_case_list(data, path)
 
 
-def normalize_case_list(raw: Iterable[Any], source: Path | None = None) -> list[TestCase]:
-    cases: list[TestCase] = []
-    for i, item in enumerate(raw, 1):
-        if isinstance(item, str):
-            cases.append(TestCase(name=f"case_{i:03d}", input=item))
-        elif isinstance(item, dict):
-            if "input" not in item:
-                raise ValueError(f"{source or '生成器'} 的第 {i} 个用例缺少 input 字段")
-            cases.append(TestCase(name=str(item.get("name", f"case_{i:03d}")), input=str(item["input"])))
-        else:
-            raise ValueError(f"{source or '生成器'} 的第 {i} 个用例格式不支持")
-    return cases
-
-
-def load_cases_from_in_dir(path: Path, pattern: str = "*.in") -> list[TestCase]:
-    """从目录中的 .in 文件读取测试用例。"""
-    if not path.exists():
-        raise ValueError(f".in 目录不存在: {path}")
-    files = sorted(path.glob(pattern))
-    if not files:
-        raise ValueError(f".in 目录中没有匹配 {pattern} 的文件: {path}")
-    cases: list[TestCase] = []
-    for file in files:
-        cases.append(TestCase(name=file.stem, input=file.read_text(encoding="utf-8")))
-    return cases
-
-
 def load_cases_from_manifest(
     manifest_path: Path,
     output_dir: Path,
@@ -401,27 +336,6 @@ def load_cases_from_manifest(
         cases.append(TestCase(name=path.stem, input=text))
 
     return cases
-
-
-def load_cases_from_generator(path: Path, seed: int | None) -> list[TestCase]:
-    spec = importlib.util.spec_from_file_location("diff_runner_generator", str(path))
-    if spec is None or spec.loader is None:
-        raise ValueError(f"无法加载生成器: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    func = getattr(module, "generate_cases", None)
-    if not callable(func):
-        raise ValueError(f"生成器必须定义 generate_cases(seed=None): {path}")
-
-    sig = inspect.signature(func)
-    if "seed" in sig.parameters:
-        raw = func(seed=seed)
-    else:
-        raw = func()
-    if isinstance(raw, dict):
-        raw = raw.get("cases", [])
-    return normalize_case_list(raw, path)
 
 
 class GeneratorRunError(Exception):
@@ -828,14 +742,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--keep-build", action="store_true", help="保留编译和运行中间文件")
     return parser.parse_args()
 
-def parse_md(path):
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
-    m = re.search(r'<!--\s*AIOJ-META(.*?)-->', text, re.S)
-    meta = m.group(1) if m else ""
-    tl = re.search(r'TL:\s*(\d+(?:\.\d{1,3})?)\s*s?', meta)
-    timeout_md = float(tl.group(1)) if tl else None
-    return timeout_md
 
 def _main() -> int:
     args = parse_args()
